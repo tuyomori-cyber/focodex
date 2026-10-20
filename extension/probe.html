@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Focodex 接続検証</title>
+<link rel="stylesheet" href="probe.css">
+<main>
+  <h1>Focodex 接続検証</h1>
+  <p>プロジェクトを選び、指示を1件送信します。初回はファイル変更を伴わない指示で確認してください。</p>
+  <p>この検証版は承認・追加質問への回答に未対応です。要求された場合は処理を終了して理由を表示します。</p>
+  <button id="connect">Hostへ接続</button>
+  <form id="form">
+    <label for="project">プロジェクト</label>
+    <select id="project" disabled></select>
+    <label for="model">モデル</label>
+    <select id="model" disabled><option value="">モデルを選択してください</option></select>
+    <button id="refresh-models" type="button" disabled>モデル一覧を再取得</button>
+    <label for="prompt">指示文</label>
+    <textarea id="prompt" rows="5" maxlength="20000">ツールを使わず、ファイルの読み書きやコマンド実行をせずに、「Focodex接続成功」とだけ返答してください。</textarea>
+    <button id="run" disabled>Codexへ送信</button>
+  </form>
+  <p id="status" role="status" aria-live="polite">未接続</p>
+  <h2>応答全文</h2>
+  <pre id="answer"></pre>
+  <details><summary>接続・実行情報</summary><pre id="info"></pre></details>
+  <p>タブを閉じると接続と今回の実行を終了します。既に行われたファイル変更は戻しません。履歴はこの画面を閉じると消えます。</p>
+</main>
+<script src="probe.js"></script>
+</html>
