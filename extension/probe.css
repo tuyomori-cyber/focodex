@@ -6,3 +6,6 @@ select, textarea { width: 100%; }
 button { margin-top: .7rem; cursor: pointer; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 #status { font-weight: bold; }
+#interaction { border: 2px solid currentColor; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
+#operation-text { border: 1px solid; padding: .8rem; max-height: 18rem; overflow: auto; }
+#approval-warning { font-weight: bold; }

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import selectors
+import secrets
 import signal
 import struct
 import subprocess
@@ -16,6 +17,7 @@ MAX_NATIVE = 128 * 1024
 MAX_RPC = 8 * 1024 * 1024
 MAX_TEXT = 160_000  # Keeps the UTF-8 native result below Firefox's 1 MiB limit.
 TIMEOUT = 180
+STOP_TIMEOUT = 5
 
 
 def send(message):
@@ -63,6 +65,15 @@ class Host:
         self.catalogs = {}
         self.model_rows = []
         self.cursors = set()
+        self.stop_requested = False
+        self.stop_started = 0
+        self.interrupt_sent = False
+        self.interrupt_acknowledged = False
+        self.stop_fallback_used = False
+        self.cleanup_uncertain = False
+        self.codex_turn_status = None
+        self.pending_request = None
+        self.items = {}
 
     def rpc(self, method, params, rpc_id=None):
         value = {'method': method, 'params': params}
@@ -72,13 +83,17 @@ class Host:
         self.process.stdin.flush()
 
     def cleanup(self):
+        process_state = None
         if self.process:
             process = self.process
+            process_state = {'leaderExitCode': None, 'processGroupGone': False,
+                             'terminationSignal': None}
             self.selector.unregister(process.stdout)
             # Kill only the dedicated process group created for this invocation.
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 try:
                     os.killpg(process.pid, sig)
+                    process_state['terminationSignal'] = signal.Signals(sig).name
                 except ProcessLookupError:
                     break
                 if sig == signal.SIGTERM:
@@ -90,7 +105,13 @@ class Host:
                         except ProcessLookupError:
                             break
                         time.sleep(0.02)
-            process.wait(timeout=3)
+            process_state['leaderExitCode'] = process.wait(timeout=3)
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                process_state['processGroupGone'] = True
+            if not process_state['processGroupGone']:
+                self.cleanup_uncertain = True
             process.stdin.close()
             process.stdout.close()
             self.process = None
@@ -98,15 +119,37 @@ class Host:
             self.lock.close()
             self.lock = None
         self.rpc_buffer.clear()
+        return process_state
 
     def finish(self, status, error=None):
+        stop = {'requested': self.stop_requested, 'interruptSent': self.interrupt_sent,
+                'interruptAcknowledged': self.interrupt_acknowledged,
+                'fallbackUsed': self.stop_fallback_used,
+                'turnStatus': self.codex_turn_status}
         result = {'type': 'result', 'id': self.request_id, 'status': status,
                   'text': '\n\n'.join(self.messages.values()), 'error': error,
                   'threadId': self.thread_id, 'turnId': self.turn_id,
                   'agentVersion': self.agent_version, 'settings': self.settings}
-        self.cleanup()
+        stop['process'] = self.cleanup()
+        if self.operation == 'run':
+            result['stopDiagnostics'] = stop
+            if not stop['process']['processGroupGone']:
+                result['status'] = 'failed'
+                result['error'] = '専用プロセス群の終了を確認できません。再実行せず状態を確認してください。'
         self.request_id = None
+        self.stop_requested = False
+        self.interrupt_sent = False
+        self.interrupt_acknowledged = False
+        self.stop_fallback_used = False
+        self.codex_turn_status = None
+        self.pending_request = None
+        self.items = {}
         send(result)
+
+    def interrupt(self):
+        if self.stop_requested and not self.interrupt_sent and self.thread_id and self.turn_id:
+            self.rpc('turn/interrupt', {'threadId': self.thread_id, 'turnId': self.turn_id}, 5)
+            self.interrupt_sent = True
 
     def command(self, value):
         if not isinstance(value, dict) or not isinstance(value.get('id'), str):
@@ -118,8 +161,22 @@ class Host:
                 {'id': key, 'name': item.get('name', key), 'path': item['path']}
                 for key, item in projects.items()]})
             return
+        if value.get('type') == 'stop':
+            if not self.process or self.operation != 'run' or value.get('targetId') != self.request_id:
+                raise ValueError('停止対象の実行がありません。')
+            if not self.stop_requested:
+                self.stop_requested = True
+                self.stop_started = time.monotonic()
+                self.interrupt()
+            send({'type': 'stopping', 'id': self.request_id})
+            return
+        if value.get('type') == 'respond':
+            self.respond(value)
+            return
         if value.get('type') not in ('run', 'models'):
             raise ValueError('未対応の操作です。')
+        if self.cleanup_uncertain:
+            raise ValueError('前回の専用プロセス群の終了を確認できません。再実行できません。')
         if self.process:
             raise ValueError('実行中です。同時実行は1件です。')
         executable, projects = config()
@@ -152,6 +209,13 @@ class Host:
         self.messages = {}
         self.thread_id = self.turn_id = self.agent_version = None
         self.settings = {}
+        self.stop_requested = False
+        self.interrupt_sent = False
+        self.interrupt_acknowledged = False
+        self.stop_fallback_used = False
+        self.codex_turn_status = None
+        self.pending_request = None
+        self.items = {}
         self.started = time.monotonic()
         try:
             self.process = subprocess.Popen(
@@ -167,10 +231,140 @@ class Host:
             raise
         send({'type': 'started', 'id': request_id})
 
+    def respond(self, value):
+        pending = self.pending_request
+        if (not self.process or self.stop_requested or not pending or
+                value.get('targetId') != self.request_id or
+                value.get('requestId') != pending['requestId'] or
+                value.get('itemId') != pending['itemId'] or
+                self.thread_id != pending['threadId'] or
+                self.turn_id != pending['turnId']):
+            raise ValueError('回答対象の要求がありません。')
+        if pending['kind'] == 'question':
+            answers = value.get('answers')
+            questions = pending['questions']
+            if not isinstance(answers, dict) or set(answers) != {q['id'] for q in questions}:
+                raise ValueError('全ての質問に回答してください。')
+            result = {}
+            for question in questions:
+                answer = answers[question['id']]
+                if not isinstance(answer, str) or not answer.strip() or len(answer) > 20000:
+                    raise ValueError('回答は1〜20000文字で入力してください。')
+                options = question.get('options') or []
+                if options and not question.get('isOther') and answer not in [row['label'] for row in options]:
+                    raise ValueError('選択肢から回答してください。')
+                result[question['id']] = {'answers': [answer]}
+            response = {'answers': result}
+        else:
+            decision = value.get('decision')
+            if decision not in ('accept', 'decline'):
+                raise ValueError('承認または拒否を選んでください。')
+            if decision == 'accept':
+                if value.get('approvalScope') != 'once':
+                    raise ValueError('今回だけの承認を指定してください。')
+                if not pending['approvable']:
+                    raise ValueError('操作内容と理由を確認できないため承認できません。')
+            response = {'decision': decision}
+        self.rpc_response(pending['rpcId'], response)
+        self.pending_request = None
+        self.started = time.monotonic()
+        send({'type': 'answered', 'id': self.request_id, 'requestId': pending['requestId']})
+
+    def rpc_response(self, rpc_id, result):
+        self.process.stdin.write((json.dumps({'id': rpc_id, 'result': result}) + '\n').encode())
+        self.process.stdin.flush()
+
+    def request_interaction(self, value):
+        method = value['method']
+        params = value.get('params')
+        kinds = {'item/commandExecution/requestApproval': 'command',
+                 'item/fileChange/requestApproval': 'file',
+                 'item/tool/requestUserInput': 'question'}
+        if (method not in kinds or self.operation != 'run' or self.pending_request or
+                not isinstance(params, dict) or params.get('threadId') != self.thread_id or
+                not isinstance(params.get('turnId'), str) or
+                (self.turn_id and params.get('turnId') != self.turn_id)):
+            self.finish('unsupported_request', f'対応できないCodex要求です: {method}')
+            return
+        if self.turn_id is None:
+            self.turn_id = params['turnId']
+        kind = kinds[method]
+        item_id = params.get('itemId')
+        if not isinstance(item_id, str) or not item_id:
+            self.finish('unsupported_request', '承認対象の項目IDを確認できません。')
+            return
+        details = {}
+        approvable = False
+        if kind == 'command':
+            item = self.items.get(item_id, {})
+            if item and item.get('type') != 'commandExecution':
+                self.finish('unsupported_request', '承認要求と実行項目の種類が一致しません。')
+                return
+            if params.get('networkApprovalContext') is not None or params.get('kind') not in (None, 'command'):
+                self.finish('unsupported_request', 'この形式のコマンド承認には対応していません。')
+                return
+            request_command = params.get('command')
+            item_command = item.get('command') if item.get('type') == 'commandExecution' else None
+            if params.get('cwd') and item.get('cwd') and params['cwd'] != item['cwd']:
+                self.finish('unsupported_request', '承認要求と実行項目の作業場所が一致しません。')
+                return
+            if request_command and item_command and request_command != item_command:
+                self.finish('unsupported_request', '承認要求と実行項目のコマンドが一致しません。')
+                return
+            command = request_command or item_command
+            reason = params.get('reason')
+            cwd = params.get('cwd') or (item.get('cwd') if item.get('type') == 'commandExecution' else None)
+            details = {'command': command, 'cwd': cwd, 'reason': reason}
+            # A command may read, write, contact the network, or elevate privileges.
+            # Displaying its text cannot establish that it is within Focodex policy.
+            approvable = False
+        elif kind == 'file':
+            item = self.items.get(item_id, {})
+            if item and item.get('type') != 'fileChange':
+                self.finish('unsupported_request', '承認要求と変更項目の種類が一致しません。')
+                return
+            changes = item.get('changes') if item.get('type') == 'fileChange' else None
+            if not isinstance(changes, list):
+                changes = []
+            changes = [{key: row.get(key) for key in ('path', 'kind', 'diff')}
+                       for row in changes if isinstance(row, dict)]
+            details = {'changes': changes, 'grantRoot': params.get('grantRoot'),
+                       'reason': params.get('reason')}
+            # Generic file-change approval could grant writes outside the project.
+            approvable = False
+        else:
+            questions = params.get('questions')
+            if (not isinstance(questions, list) or not 1 <= len(questions) <= 3 or
+                    any(not isinstance(q, dict) or not isinstance(q.get('id'), str) or
+                        not isinstance(q.get('question'), str) or q.get('isSecret') or
+                        (q.get('options') is not None and
+                         (not isinstance(q['options'], list) or
+                          any(not isinstance(o, dict) or not isinstance(o.get('label'), str)
+                              for o in q['options']))) for q in questions) or
+                    len({q['id'] for q in questions}) != len(questions)):
+                self.finish('unsupported_request', 'この形式の追加質問には対応していません。')
+                return
+            details = {'questions': questions}
+        if len(json.dumps(details, ensure_ascii=False).encode('utf-8')) > 32000:
+            if kind == 'question':
+                self.finish('unsupported_request', '要求内容が表示上限を超えました。')
+                return
+            details = {'reason': '表示上限を超えたため内容を表示できません。'}
+            approvable = False
+        request_id = secrets.token_urlsafe(18)
+        self.pending_request = {'rpcId': value['id'], 'requestId': request_id,
+                                'itemId': item_id, 'threadId': self.thread_id,
+                                'turnId': self.turn_id, 'kind': kind, 'details': details,
+                                'approvable': approvable,
+                                'questions': details.get('questions', [])}
+        send({'type': 'interaction', 'id': self.request_id,
+              'requestId': request_id, 'itemId': item_id,
+              'kind': kind, 'details': details,
+              'approvable': approvable, 'approvalScope': 'once' if kind != 'question' else None})
+
     def event(self, value):
-        # Step 1 deliberately has no approval/question UI. Never auto-approve.
         if 'method' in value and 'id' in value:
-            self.finish('unsupported_request', f"この検証版は承認・質問に未対応です: {value['method']}")
+            self.request_interaction(value)
             return
         if 'error' in value and 'id' in value:
             self.finish('failed', json.dumps(value['error'], ensure_ascii=False)[:4000])
@@ -181,9 +375,8 @@ class Host:
             if self.operation == 'models':
                 self.rpc('model/list', {'limit': 100, 'includeHidden': False}, 4)
             else:
-                # Only the user's explicit model selection overrides a setting.
-                # approvalPolicy, sandbox and config remain inherited.
-                params = {'cwd': self.cwd, 'ephemeral': True}
+                params = {'cwd': self.cwd, 'ephemeral': True,
+                          'sandbox': 'workspace-write', 'approvalPolicy': 'on-request'}
                 if self.model is not None:
                     params['model'] = self.model
                 self.rpc('thread/start', params, 2)
@@ -214,10 +407,41 @@ class Host:
             self.thread_id = result['thread']['id']
             self.settings = {key: result.get(key) for key in
                              ('model', 'approvalPolicy', 'approvalsReviewer', 'sandbox')}
+            sandbox_type = result.get('sandbox', {}).get('type') if isinstance(result.get('sandbox'), dict) else None
+            if sandbox_type != 'workspaceWrite' or result.get('approvalPolicy') != 'on-request':
+                self.finish('failed', 'Codexの有効な権限設定を確認できません。実行を開始しません。')
+                return
+            sandbox = {'type': 'workspaceWrite', 'writableRoots': [],
+                       'networkAccess': False, 'excludeSlashTmp': True,
+                       'excludeTmpdirEnvVar': True}
             self.rpc('turn/start', {'threadId': self.thread_id,
-                     'input': [{'type': 'text', 'text': self.prompt}]}, 3)
+                     'input': [{'type': 'text', 'text': self.prompt}],
+                     'sandboxPolicy': sandbox, 'approvalPolicy': 'on-request'}, 3)
         elif value.get('id') == 3:
-            self.turn_id = value['result']['turn']['id']
+            turn_id = value['result']['turn']['id']
+            if self.turn_id and self.turn_id != turn_id:
+                self.finish('failed', '開始したターンと承認要求のターンが一致しません。')
+                return
+            self.turn_id = turn_id
+            self.interrupt()
+        elif value.get('id') == 5:
+            self.interrupt_acknowledged = True
+        elif value.get('method') == 'item/started':
+            params = value.get('params', {})
+            item = params.get('item', {})
+            if (params.get('threadId') == self.thread_id and
+                    (not self.turn_id or params.get('turnId') == self.turn_id) and
+                    isinstance(item, dict) and isinstance(item.get('id'), str) and
+                    item.get('type') in ('commandExecution', 'fileChange')):
+                self.items[item['id']] = item
+        elif value.get('method') == 'serverRequest/resolved':
+            params = value.get('params', {})
+            pending = self.pending_request
+            if (pending and params.get('threadId') == pending['threadId'] and
+                    params.get('requestId') == pending['rpcId']):
+                self.pending_request = None
+                send({'type': 'interaction_resolved', 'id': self.request_id,
+                      'requestId': pending['requestId'], 'itemId': pending['itemId']})
         elif value.get('method') == 'item/completed':
             params = value['params']
             item = params['item']
@@ -235,12 +459,16 @@ class Host:
             status = turn['status']
             if status not in ('completed', 'failed', 'interrupted'):
                 raise ValueError('未知の終了状態です。')
+            self.codex_turn_status = status
             self.finish(status, turn.get('error'))
 
     def loop(self):
         try:
             while True:
-                if self.process and time.monotonic() - self.started > TIMEOUT:
+                if self.process and self.stop_requested and time.monotonic() - self.stop_started > STOP_TIMEOUT:
+                    self.stop_fallback_used = True
+                    self.finish('interrupted', '中断応答が5秒以内に届かず、専用プロセス群を終了しました。')
+                if self.process and not self.pending_request and time.monotonic() - self.started > TIMEOUT:
                     self.finish('timeout', '180秒以内に終了しませんでした。実行を終了しました。')
                 for key, _ in self.selector.select(0.2):
                     if key.data == 'codex' and not self.process:

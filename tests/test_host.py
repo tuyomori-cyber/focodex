@@ -19,10 +19,11 @@ from pathlib import Path
 Path(os.environ['FAKE_PID']).write_text(str(os.getpid()))
 def emit(value):
     print(json.dumps(value), flush=True)
+pending = None
 for line in sys.stdin:
     request = json.loads(line)
-    method = request['method']
-    params = request['params']
+    method = request.get('method')
+    params = request.get('params')
     if method == 'initialize':
         emit({'id': request['id'], 'result': {'userAgent': 'fake/0.145.0'}})
     elif method == 'model/list':
@@ -36,18 +37,73 @@ for line in sys.stdin:
             emit({'id': request['id'], 'result': {'data': [
                 {'model': 'test-second', 'displayName': 'Second', 'isDefault': False}], 'nextCursor': None}})
     elif method == 'thread/start':
-        assert set(params) in ({'cwd', 'ephemeral'}, {'cwd', 'ephemeral', 'model'}), params
+        assert set(params) in ({'cwd', 'ephemeral', 'sandbox', 'approvalPolicy'}, {'cwd', 'ephemeral', 'model', 'sandbox', 'approvalPolicy'}), params
+        assert params['sandbox'] == 'workspace-write'
+        assert params['approvalPolicy'] == 'on-request'
         assert params['cwd'] == os.getcwd()
         emit({'id': request['id'], 'result': {'thread': {'id': 'thread-1'},
-             'model': params.get('model', 'inherited'), 'approvalPolicy': 'on-request', 'sandbox': {'type': 'workspaceWrite'}}})
+             'model': params.get('model', 'inherited'), 'approvalPolicy': 'on-request',
+             'sandbox': {'type': os.environ.get('FAKE_SANDBOX', 'workspaceWrite')}}})
     elif method == 'turn/start':
-        assert set(params) == {'threadId', 'input'}
+        assert set(params) == {'threadId', 'input', 'sandboxPolicy', 'approvalPolicy'}
+        assert params['approvalPolicy'] == 'on-request'
+        assert params['sandboxPolicy'] == {'type': 'workspaceWrite', 'writableRoots': [],
+            'networkAccess': False, 'excludeSlashTmp': True, 'excludeTmpdirEnvVar': True}
         text = params['input'][0]['text']
         emit({'id': request['id'], 'result': {'turn': {'id': 'turn-1'}}})
         if text == 'hang':
             time.sleep(60)
+        elif text == 'wait-interrupt':
+            pass
         elif text == 'approval':
             emit({'id': 99, 'method': 'item/commandExecution/requestApproval', 'params': {}})
+        elif text in ('approval-request', 'approval-decline'):
+            pending = text
+            emit({'id': 99, 'method': 'item/commandExecution/requestApproval', 'params': {
+                'threadId': 'thread-1', 'turnId': 'turn-1', 'itemId': 'item-1',
+                'command': 'echo test', 'cwd': os.getcwd(), 'reason': 'test reason',
+                'startedAtMs': 1}})
+        elif text == 'approval-resolved':
+            emit({'id': 94, 'method': 'item/commandExecution/requestApproval', 'params': {
+                'threadId': 'thread-1', 'turnId': 'turn-1', 'itemId': 'item-1',
+                'command': 'echo test', 'cwd': os.getcwd(), 'reason': 'test reason',
+                'startedAtMs': 1}})
+            emit({'method': 'serverRequest/resolved', 'params': {
+                'threadId': 'thread-1', 'requestId': 94}})
+        elif text == 'approval-no-reason':
+            pending = text
+            emit({'id': 93, 'method': 'item/commandExecution/requestApproval', 'params': {
+                'threadId': 'thread-1', 'turnId': 'turn-1', 'itemId': 'item-1',
+                'command': 'echo test', 'cwd': os.getcwd(), 'startedAtMs': 1}})
+        elif text == 'question':
+            pending = text
+            emit({'id': 98, 'method': 'item/tool/requestUserInput', 'params': {
+                'threadId': 'thread-1', 'turnId': 'turn-1', 'itemId': 'item-1',
+                'isBlocking': True, 'questions': [
+                    {'id': 'choice', 'header': '種類', 'question': 'どちらですか？',
+                     'options': [{'label': 'A', 'description': '最初'}, {'label': 'B', 'description': '次'}]},
+                    {'id': 'detail', 'header': '詳細', 'question': '説明してください', 'options': None}]}})
+        elif text == 'file-approval':
+            pending = text
+            emit({'id': 97, 'method': 'item/fileChange/requestApproval', 'params': {
+                'threadId': 'thread-1', 'turnId': 'turn-1', 'itemId': 'item-1',
+                'grantRoot': '/tmp/other', 'reason': 'test reason', 'startedAtMs': 1}})
+        elif text == 'file-approval-diff':
+            pending = text
+            emit({'method': 'item/started', 'params': {'threadId': 'thread-1', 'turnId': 'turn-1',
+                'item': {'id': 'item-1', 'type': 'fileChange', 'changes': [
+                    {'path': '/tmp/test.txt', 'kind': 'add', 'diff': '+test\\n'}]}}})
+            emit({'id': 96, 'method': 'item/fileChange/requestApproval', 'params': {
+                'threadId': 'thread-1', 'turnId': 'turn-1', 'itemId': 'item-1',
+                'reason': 'test reason', 'startedAtMs': 1}})
+        elif text == 'approval-mismatch':
+            emit({'method': 'item/started', 'params': {'threadId': 'thread-1', 'turnId': 'turn-1',
+                'item': {'id': 'item-1', 'type': 'commandExecution',
+                         'command': 'echo different', 'cwd': os.getcwd()}}})
+            emit({'id': 95, 'method': 'item/commandExecution/requestApproval', 'params': {
+                'threadId': 'thread-1', 'turnId': 'turn-1', 'itemId': 'item-1',
+                'command': 'echo test', 'cwd': os.getcwd(), 'reason': 'test reason',
+                'startedAtMs': 1}})
         elif text == 'crash':
             sys.exit(2)
         elif text == 'rpc-error':
@@ -59,6 +115,22 @@ for line in sys.stdin:
             emit({'method': 'turn/completed', 'params': {'threadId': 'thread-1',
                 'turn': {'id': 'turn-1', 'status': 'failed' if text == 'fail' else 'completed',
                          'error': {'message': 'test failure'} if text == 'fail' else None}}})
+    elif method == 'turn/interrupt':
+        assert params == {'threadId': 'thread-1', 'turnId': 'turn-1'}
+        emit({'id': request['id'], 'result': {}})
+        emit({'method': 'turn/completed', 'params': {'threadId': 'thread-1',
+            'turn': {'id': 'turn-1', 'status': 'interrupted'}}})
+    elif method is None and pending:
+        if pending == 'question':
+            assert request['result'] == {'answers': {
+                'choice': {'answers': ['B']}, 'detail': {'answers': ['自由回答']}}}
+        else:
+            assert request['result'] == {'decision': 'decline'}
+        pending = None
+        emit({'method': 'item/completed', 'params': {'threadId': 'thread-1',
+            'item': {'id': 'reply', 'type': 'agentMessage', 'text': '回答を受け取りました'}}})
+        emit({'method': 'turn/completed', 'params': {'threadId': 'thread-1',
+            'turn': {'id': 'turn-1', 'status': 'completed'}}})
 '''
 
 
@@ -77,8 +149,8 @@ class HostTests(unittest.TestCase):
         self.env = {**os.environ, 'FOCODEX_CONFIG': str(self.config), 'FAKE_PID': str(self.pid)}
         self.host = self.new_host()
 
-    def new_host(self):
-        process = probe.launch(self.env)
+    def new_host(self, env=None):
+        process = probe.launch(env or self.env)
         self.addCleanup(probe.close, process)
         return process
 
@@ -88,7 +160,7 @@ class HostTests(unittest.TestCase):
         return probe.read_message(process, 5)
 
     def result(self):
-        message = probe.read_message(self.host, 5)
+        message = probe.read_message(self.host, 8)
         self.assertEqual(message['type'], 'result')
         return message
 
@@ -128,9 +200,127 @@ class HostTests(unittest.TestCase):
         self.run_prompt('fail')
         self.assertEqual(self.result()['status'], 'failed')
 
+    def test_unexpected_effective_sandbox_stops_before_turn(self):
+        other = self.new_host({**self.env, 'FAKE_SANDBOX': 'readOnly'})
+        self.assertEqual(self.run_prompt(host=other)['type'], 'started')
+        result = probe.read_message(other, 5)
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('有効な権限設定', result['error'])
+
     def test_approval_never_automatically_allowed(self):
         self.run_prompt('approval')
         self.assertEqual(self.result()['status'], 'unsupported_request')
+
+    def test_command_approval_requires_explicit_answer(self):
+        for prompt, decision in [('approval-request', 'decline'), ('approval-decline', 'decline')]:
+            self.assertEqual(self.run_prompt(prompt)['type'], 'started')
+            interaction = probe.read_message(self.host, 5)
+            self.assertEqual(interaction['type'], 'interaction')
+            self.assertEqual(interaction['details']['command'], 'echo test')
+            self.assertFalse(interaction['approvable'])
+            self.assertEqual(interaction['approvalScope'], 'once')
+            if decision == 'decline':
+                probe.write_message(self.host, {'type': 'respond', 'id': 'wrong-item',
+                    'targetId': 'run-1', 'requestId': interaction['requestId'], 'itemId': 'other',
+                    'decision': 'accept', 'approvalScope': 'once'})
+                self.assertEqual(probe.read_message(self.host)['type'], 'error')
+                probe.write_message(self.host, {'type': 'respond', 'id': 'wrong-scope',
+                    'targetId': 'run-1', 'requestId': interaction['requestId'],
+                    'itemId': interaction['itemId'], 'decision': 'accept',
+                    'approvalScope': 'session'})
+                self.assertEqual(probe.read_message(self.host)['type'], 'error')
+            probe.write_message(self.host, {'type': 'respond', 'id': 'answer',
+                'targetId': 'run-1', 'requestId': interaction['requestId'], 'itemId': interaction['itemId'],
+                'decision': decision, 'approvalScope': 'once' if decision == 'accept' else None})
+            self.assertEqual(probe.read_message(self.host)['type'], 'answered')
+            self.assertEqual(self.result()['status'], 'completed')
+
+    def test_question_choice_and_free_text(self):
+        self.assertEqual(self.run_prompt('question')['type'], 'started')
+        interaction = probe.read_message(self.host, 5)
+        self.assertEqual(interaction['kind'], 'question')
+        probe.write_message(self.host, {'type': 'respond', 'id': 'bad', 'targetId': 'run-1',
+            'requestId': interaction['requestId'], 'itemId': interaction['itemId'],
+            'answers': {'choice': 'invalid', 'detail': '自由回答'}})
+        self.assertEqual(probe.read_message(self.host)['type'], 'error')
+        probe.write_message(self.host, {'type': 'respond', 'id': 'answer', 'targetId': 'run-1',
+            'requestId': interaction['requestId'], 'itemId': interaction['itemId'],
+            'answers': {'choice': 'B', 'detail': '自由回答'}})
+        self.assertEqual(probe.read_message(self.host)['type'], 'answered')
+        self.assertEqual(self.result()['text'], '回答を受け取りました')
+
+    def test_file_change_cannot_be_approved_without_change_details(self):
+        self.assertEqual(self.run_prompt('file-approval')['type'], 'started')
+        interaction = probe.read_message(self.host, 5)
+        self.assertEqual(interaction['kind'], 'file')
+        self.assertFalse(interaction['approvable'])
+        probe.write_message(self.host, {'type': 'respond', 'id': 'bad', 'targetId': 'run-1',
+            'requestId': interaction['requestId'], 'itemId': interaction['itemId'],
+            'decision': 'accept', 'approvalScope': 'once'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'error')
+        probe.write_message(self.host, {'type': 'respond', 'id': 'answer', 'targetId': 'run-1',
+            'requestId': interaction['requestId'], 'itemId': interaction['itemId'], 'decision': 'decline'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'answered')
+        self.assertEqual(self.result()['status'], 'completed')
+
+    def test_file_change_diff_can_be_approved_once(self):
+        self.assertEqual(self.run_prompt('file-approval-diff')['type'], 'started')
+        interaction = probe.read_message(self.host, 5)
+        self.assertFalse(interaction['approvable'])
+        self.assertEqual(interaction['details']['changes'][0]['path'], '/tmp/test.txt')
+        probe.write_message(self.host, {'type': 'respond', 'id': 'answer', 'targetId': 'run-1',
+            'requestId': interaction['requestId'], 'itemId': interaction['itemId'],
+            'decision': 'accept', 'approvalScope': 'once'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'error')
+        probe.write_message(self.host, {'type': 'respond', 'id': 'decline',
+            'targetId': 'run-1', 'requestId': interaction['requestId'],
+            'itemId': interaction['itemId'], 'decision': 'decline'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'answered')
+        self.assertEqual(self.result()['status'], 'completed')
+
+    def test_mismatched_command_is_never_approvable(self):
+        self.assertEqual(self.run_prompt('approval-mismatch')['type'], 'started')
+        self.assertEqual(self.result()['status'], 'unsupported_request')
+
+    def test_missing_reason_disables_approval(self):
+        self.assertEqual(self.run_prompt('approval-no-reason')['type'], 'started')
+        interaction = probe.read_message(self.host, 5)
+        self.assertFalse(interaction['approvable'])
+        probe.write_message(self.host, {'type': 'respond', 'id': 'bad', 'targetId': 'run-1',
+            'requestId': interaction['requestId'], 'itemId': interaction['itemId'],
+            'decision': 'accept', 'approvalScope': 'once'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'error')
+        probe.write_message(self.host, {'type': 'respond', 'id': 'answer', 'targetId': 'run-1',
+            'requestId': interaction['requestId'], 'itemId': interaction['itemId'],
+            'decision': 'decline'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'answered')
+        self.assertEqual(self.result()['status'], 'completed')
+
+    def test_stop_invalidates_pending_approval(self):
+        self.assertEqual(self.run_prompt('approval-request')['type'], 'started')
+        interaction = probe.read_message(self.host, 5)
+        self.assertEqual(interaction['kind'], 'command')
+        probe.write_message(self.host, {'type': 'stop', 'id': 'stop-1', 'targetId': 'run-1'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'stopping')
+        self.assertEqual(self.result()['status'], 'interrupted')
+        probe.write_message(self.host, {'type': 'respond', 'id': 'late', 'targetId': 'run-1',
+            'requestId': interaction['requestId'], 'itemId': interaction['itemId'],
+            'decision': 'accept', 'approvalScope': 'once'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'error')
+
+    def test_resolved_request_cannot_be_approved(self):
+        self.assertEqual(self.run_prompt('approval-resolved')['type'], 'started')
+        interaction = probe.read_message(self.host, 5)
+        resolved = probe.read_message(self.host, 5)
+        self.assertEqual(resolved['type'], 'interaction_resolved')
+        self.assertEqual(resolved['requestId'], interaction['requestId'])
+        probe.write_message(self.host, {'type': 'respond', 'id': 'late', 'targetId': 'run-1',
+            'requestId': interaction['requestId'], 'itemId': interaction['itemId'],
+            'decision': 'accept', 'approvalScope': 'once'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'error')
+        probe.write_message(self.host, {'type': 'stop', 'id': 'stop-1', 'targetId': 'run-1'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'stopping')
+        self.assertEqual(self.result()['status'], 'interrupted')
 
     def test_server_disconnect_and_rpc_error(self):
         for text in ['crash', 'rpc-error']:
@@ -166,6 +356,37 @@ class HostTests(unittest.TestCase):
         self.host.wait(timeout=5)
         with self.assertRaises(ProcessLookupError):
             os.kill(child, 0)
+
+    def test_stop_waits_for_confirmed_exit(self):
+        self.assertEqual(self.run_prompt('hang')['type'], 'started')
+        deadline = time.monotonic() + 3
+        while not self.pid.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        child = int(self.pid.read_text())
+        probe.write_message(self.host, {'type': 'stop', 'id': 'stop-1', 'targetId': 'run-1'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'stopping')
+        result = self.result()
+        self.assertEqual(result['status'], 'interrupted')
+        self.assertTrue(result['stopDiagnostics']['fallbackUsed'])
+        self.assertIsNone(result['stopDiagnostics']['turnStatus'])
+        self.assertTrue(result['stopDiagnostics']['process']['processGroupGone'])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child, 0)
+        self.assertEqual(self.run_prompt()['type'], 'started')
+        self.assertEqual(self.result()['status'], 'completed')
+
+    def test_stop_uses_turn_interrupt_when_codex_responds(self):
+        self.assertEqual(self.run_prompt('wait-interrupt')['type'], 'started')
+        probe.write_message(self.host, {'type': 'stop', 'id': 'stop-1', 'targetId': 'run-1'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'stopping')
+        result = self.result()
+        self.assertEqual(result['status'], 'interrupted')
+        self.assertIsNone(result['error'])
+        self.assertFalse(result['stopDiagnostics']['fallbackUsed'])
+        self.assertTrue(result['stopDiagnostics']['interruptSent'])
+        self.assertTrue(result['stopDiagnostics']['interruptAcknowledged'])
+        self.assertEqual(result['stopDiagnostics']['turnStatus'], 'interrupted')
+        self.assertTrue(result['stopDiagnostics']['process']['processGroupGone'])
 
     def test_install_preserves_existing_config(self):
         target = Path(self.temp.name) / 'home'

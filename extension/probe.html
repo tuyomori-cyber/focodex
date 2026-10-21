@@ -7,7 +7,7 @@
 <main>
   <h1>Focodex 接続検証</h1>
   <p>プロジェクトを選び、指示を1件送信します。初回はファイル変更を伴わない指示で確認してください。</p>
-  <p>この検証版は承認・追加質問への回答に未対応です。要求された場合は処理を終了して理由を表示します。</p>
+  <p>承認要求と追加質問が届いた場合は内容を確認し、明示的に回答してください。停止もできます。</p>
   <button id="connect">Hostへ接続</button>
   <form id="form">
     <label for="project">プロジェクト</label>
@@ -18,8 +18,26 @@
     <label for="prompt">指示文</label>
     <textarea id="prompt" rows="5" maxlength="20000">ツールを使わず、ファイルの読み書きやコマンド実行をせずに、「Focodex接続成功」とだけ返答してください。</textarea>
     <button id="run" disabled>Codexへ送信</button>
+    <button id="stop" type="button" disabled>停止</button>
   </form>
   <p id="status" role="status" aria-live="polite">未接続</p>
+  <p id="diagnostics"></p>
+  <section id="interaction" hidden>
+    <h2 id="interaction-title"></h2>
+    <pre id="interaction-details"></pre>
+    <div id="approval-view" hidden>
+      <h3 id="operation-label"></h3>
+      <pre id="operation-text"></pre>
+      <p id="operation-cwd"></p>
+      <p id="approval-reason"></p>
+      <p id="approval-scope"></p>
+      <p id="approval-warning"></p>
+    </div>
+    <div id="questions"></div>
+    <button id="decline" type="button">拒否</button>
+    <button id="approve" type="button">今回だけ承認</button>
+    <button id="answer-question" type="button">回答を送信</button>
+  </section>
   <h2>応答全文</h2>
   <pre id="answer"></pre>
   <details><summary>接続・実行情報</summary><pre id="info"></pre></details>
