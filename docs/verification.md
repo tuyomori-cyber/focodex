@@ -209,3 +209,5 @@ OpenAI公式の[Sandbox](https://learn.chatgpt.com/docs/sandboxing)はUbuntu 24.
 2026-10-21、Native Hostに`git_snapshot`を追加した。登録済みプロジェクトだけを対象に`/usr/bin/git`を引数配列で実行し、Codex App Serverは通さない。プロジェクトのリポジトリルートとGit管理ディレクトリを確認し、通常リポジトリと相互リンクのあるworktreeに対応する。Codex実行との排他、任意パス・任意コマンドの拒否、10秒・25万バイトの表示上限を設けた。環境の`GIT_*`値を除去し、グローバル・システム設定、fsmonitor、フック、外部diff、textconv、任意のGit pagerを使わない。フィルターとinclude設定を検出したリポジトリは表示を拒否する。
 
 模擬Host試験24件と画面ロジック試験が成功。実FocodexリポジトリでもNative Messaging形式のHost応答として状態307バイト、未ステージ差分23038バイト、ステージ済み差分0バイトを取得した。Firefox画面はまだ再読み込み・実機確認していない。ステージング・コミット・pushは未実装であり、Git変更操作の外部ヘルパーや認証経路は別途設計する。
+
+その後、ユーザーがXubuntuのFirefoxでCodexにプロジェクトルートの`test.txt`作成を指示し、「完了」を確認した。実ファイルの内容は`test`。Gitパネルの「取得完了」と未追跡`test.txt`の表示も確認した。未追跡ファイルはGitの通常差分に含まれないため、両差分欄は「差分なし」だった。日本語ファイル名がGitの八進数エスケープで表示されていたため、`core.quotePath=false`を読み取りコマンドに追加し、画面に未追跡ファイルの説明を追記した。表示改善後のFirefox実機確認はこれから。

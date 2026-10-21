@@ -359,10 +359,12 @@ class HostTests(unittest.TestCase):
         note.write_text('base\nstaged\n')
         git('add', 'note.txt')
         note.write_text('base\nstaged\nunstaged\n')
+        (root / '日本語.txt').write_text('untracked\n')
         probe.write_message(self.host, {'type': 'git_snapshot', 'id': 'git-1', 'projectId': 'test'})
         reply = probe.read_message(self.host)
         self.assertEqual(reply['type'], 'git_snapshot')
         self.assertIn('MM note.txt', reply['status'])
+        self.assertIn('?? 日本語.txt', reply['status'])
         self.assertIn('+staged', reply['stagedDiff'])
         self.assertIn('+unstaged', reply['unstagedDiff'])
         marker = root / 'unsafe-helper-ran'

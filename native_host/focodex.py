@@ -31,7 +31,8 @@ def git_read(project, *arguments):
                 'GIT_TERMINAL_PROMPT': '0', 'GIT_PAGER': 'cat'})
     command = [GIT, '--no-pager', '--no-optional-locks', '-c', 'core.fsmonitor=false',
                '-c', 'core.hooksPath=/dev/null', '-c', 'diff.external=',
-               '-c', 'color.ui=false', '-C', str(project), *arguments]
+               '-c', 'color.ui=false', '-c', 'core.quotePath=false',
+               '-C', str(project), *arguments]
     process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, start_new_session=True)
     output_bytes = bytearray()
