@@ -150,3 +150,7 @@ Host自動試験12件、画面ロジック試験、JavaScript構文チェック�
 `thread/start`で`workspace-write`と`on-request`を指定し、`turn/start`で追加の書き込み先なし、ネットワーク禁止、`/tmp`と`TMPDIR`の書き込み除外を指定。有効なスレッド設定が異なればターンを開始しない。汎用のコマンド・ファイル変更要求は内容を表示しても承認不可とし、拒否のみ可能。Host模擬試験20件と画面ロジック試験は成功。実Codexへのツール不使用の一往復では`gpt-6-luna`で正常応答し、スレッド設定が`workspaceWrite`、`networkAccess: false`、`on-request`であることを確認した。プロジェクト内書き込みと外部アクセス境界は実Codexで未検証。
 
 さらに一時的な登録プロジェクトを作り、`gpt-6-luna`にその中の`check.txt`だけの作成を指示した。承認要求なしでターンが完了し、内容`FocodexPolicyOK\n`を確認した。一時プロジェクトと設定は終了時に削除した。これはプロジェクト内書き込みの確認であり、外部読み取りを遮断できる証拠ではない。
+
+## 次の権限検証方針
+
+ユーザー方針を「プロジェクトの中では自由に開発できる。それ以外には原則触れない」に整理。外部読み取りの承認UIはMVPで実装しない。OpenAI公式のベータ版permission profileには、`":root" = "deny"`、`":minimal" = "read"`、workspace rootの書き込みを組み合わせる例がある。従来のsandbox設定とは併用できないため、まず使用中のCLI 0.156.1とapp-serverで動作を検証する。成功を確認するまで現行の外部読み取り境界は未達のままとする。参照：https://learn.chatgpt.com/docs/permissions
