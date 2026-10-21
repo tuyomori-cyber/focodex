@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Linux-only, one-turn Codex Native Messaging proof of concept."""
+import difflib
 import fcntl
 import json
 import os
@@ -8,6 +9,7 @@ import re
 import selectors
 import secrets
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -22,6 +24,7 @@ STOP_TIMEOUT = 5
 PERMISSION_PROFILE = 'focodex-project'
 GIT = '/usr/bin/git'
 MAX_GIT_OUTPUT = 250_000
+MAX_UNTRACKED_FILE = 100_000
 
 
 def git_read(project, *arguments):
@@ -66,6 +69,69 @@ def git_read(project, *arguments):
     return output
 
 
+def project_file_preview(project, name):
+    parts = name.split('/')
+    if not parts or any(part in ('', '.', '..') for part in parts) or '\ufffd' in name:
+        return 'ファイル名を安全に扱えないため内容を省略しました。\n'
+    descriptor = os.open(project, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts[:-1]:
+            next_descriptor = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                      dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        file_descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                                  dir_fd=descriptor)
+        try:
+            if not stat.S_ISREG(os.fstat(file_descriptor).st_mode):
+                return '通常ファイル以外のため内容を省略しました。\n'
+            chunks = []
+            remaining = MAX_UNTRACKED_FILE + 1
+            while remaining:
+                chunk = os.read(file_descriptor, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b''.join(chunks)
+        finally:
+            os.close(file_descriptor)
+    except OSError:
+        return 'ファイルを安全に読み取れないため内容を省略しました。\n'
+    finally:
+        os.close(descriptor)
+    if len(data) > MAX_UNTRACKED_FILE:
+        return 'ファイルが大きいため内容を省略しました。\n'
+    if b'\0' in data:
+        return 'バイナリファイルのため内容を省略しました。\n'
+    try:
+        contents = data.decode('utf-8')
+    except UnicodeDecodeError:
+        return 'UTF-8テキストではないため内容を省略しました。\n'
+    if not contents:
+        return '空ファイル\n'
+    lines = list(difflib.unified_diff([], contents.splitlines(keepends=True),
+                                      fromfile='/dev/null', tofile='b/' + name, lineterm='\n'))
+    if not contents.endswith('\n'):
+        lines.append('\n\\ No newline at end of file\n')
+    return ''.join(lines)
+
+
+def untracked_preview(project, budget):
+    names = git_read(project, 'ls-files', '--others', '--exclude-standard', '-z').split('\0')
+    output = []
+    used = 0
+    for name in filter(None, names):
+        preview = f'未追跡: {name}\n' + project_file_preview(project, name) + '\n'
+        size = len(preview.encode('utf-8'))
+        if used + size > budget:
+            output.append('未追跡ファイルの残りは表示上限のため省略しました。\n')
+            break
+        output.append(preview)
+        used += size
+    return ''.join(output)
+
+
 def git_snapshot(project):
     project = Path(project).resolve(strict=True)
     dotgit = project / '.git'
@@ -99,8 +165,11 @@ def git_snapshot(project):
                 key == 'diff.external' and '\n' in entry and entry.split('\n', 1)[1] or
                 re.match(r'^diff\.[^.]+\.(command|textconv)$', key)):
             raise ValueError('外部ヘルパーを含むGit設定は現在の表示機能で扱えません。')
+    unstaged = git_read(project, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--')
+    remaining = MAX_GIT_OUTPUT - len(unstaged.encode('utf-8'))
+    untracked = untracked_preview(project, remaining)
     return {'status': git_read(project, 'status', '--short', '--untracked-files=all'),
-            'unstagedDiff': git_read(project, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--'),
+            'unstagedDiff': unstaged + ('\n' if unstaged and untracked else '') + untracked,
             'stagedDiff': git_read(project, 'diff', '--cached', '--no-ext-diff', '--no-textconv', '--no-color', '--')}
 
 

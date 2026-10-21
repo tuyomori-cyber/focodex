@@ -8,7 +8,7 @@ FirefoxからNative Messaging経由でCodexへ指示を1件送り、応答全文
 - Linux版Firefox、Python 3（標準ライブラリのみ）、Codex CLI。
 - 確認したCLI版：初回`0.145.0`、現在のpermission profile検証時`0.163.0`。異なる版ではapp-serverプロトコルの再確認が必要。
 - Firefoxを起動するユーザーでCodexの認証を済ませ、Firefoxで選択するモデルをその認証で利用できること。
-- Firefoxの導入形態によってNative Hostの起動環境が変わる。XubuntuのSnap版ではHost接続まで確認したが、permission profile適用後の一往復は下記の`bwrap`問題で未完了。
+- Firefoxの導入形態によってNative Hostの起動環境が変わる。XubuntuのSnap版では`bwrap`問題を経て、permission profile適用後の一往復を確認済み。
 
 ## Hostの登録
 
@@ -54,7 +54,7 @@ Native Hostは実行ID、Codex要求に紐付けた一時ID、項目ID、スレ�
 
 Firefoxを再起動すると一時拡張は再読み込みが必要。拡張コードの変更後も`about:debugging`から再読み込みする。
 
-画面下部の「Gitの状態と差分」では、選択中のプロジェクトについて「Git状態を取得」を押すと、変更ファイル一覧・未ステージ差分・ステージ済み差分を表示する。Codex App Serverを経由せず、Native Hostが読み取り専用のGitコマンドを実行する。通常リポジトリとGit worktreeを扱い、Git管理ディレクトリの実体を確認する。Codex実行中は取得しない。外部ヘルパーを設定したリポジトリや表示上限を超える差分はエラーにする。未追跡ファイルは状態一覧に出るが差分には含まれない。ステージング・コミット・pushはまだ利用できない。XubuntuのFirefox画面で取得完了と未追跡の`test.txt`の表示を確認済み。
+画面下部の「Gitの状態と差分」では、選択中のプロジェクトについて「Git状態を取得」を押すと、変更ファイル一覧・未ステージ差分（未追跡ファイルの内容を含む）・ステージ済み差分を表示する。Codex App Serverを経由せず、Native Hostが読み取り専用のGitコマンドを実行する。通常リポジトリとGit worktreeを扱い、Git管理ディレクトリの実体を確認する。Codex実行中は取得しない。外部ヘルパーを設定したリポジトリや表示上限を超える差分はエラーにする。未追跡ファイルのプレビューはプロジェクト内の通常ファイルかつUTF-8テキストに限り、1ファイル10万バイトまで表示する。ステージング・コミット・pushはまだ利用できない。XubuntuのFirefox画面で取得完了と未追跡の`test.txt`の表示を確認済み。未追跡ファイルの内容表示は画面で未確認。
 
 ## Linuxの`bwrap`とOS別の確認事項
 
