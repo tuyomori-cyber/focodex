@@ -10,7 +10,7 @@ class Element {
   append(option) { this.options.push(option); if (this.options.length === 1) this.value = option.value; }
   setAttribute() {}
 }
-const elements = Object.fromEntries(['connect', 'project', 'model', 'refresh-models', 'prompt', 'form', 'run', 'stop', 'status', 'diagnostics', 'interaction', 'interaction-title', 'interaction-details', 'approval-view', 'operation-label', 'operation-text', 'operation-cwd', 'approval-reason', 'approval-scope', 'approval-warning', 'questions', 'approve', 'decline', 'answer-question', 'answer', 'info'].map(id => [id, new Element()]));
+const elements = Object.fromEntries(['connect', 'project', 'model', 'refresh-models', 'prompt', 'form', 'run', 'stop', 'status', 'diagnostics', 'interaction', 'interaction-title', 'interaction-details', 'approval-view', 'operation-label', 'operation-text', 'operation-cwd', 'approval-reason', 'approval-scope', 'approval-warning', 'questions', 'approve', 'decline', 'answer-question', 'answer', 'info', 'git-refresh', 'git-message', 'git-status', 'git-unstaged', 'git-staged'].map(id => [id, new Element()]));
 elements.prompt.value = '接続確認';
 const sent = [];
 const storage = new Map();
@@ -33,6 +33,14 @@ reply({type: 'projects', id: sent.at(-1).id, projects: [{id: 'project', name: 'P
 assert.equal(sent.at(-1).type, 'models');
 assert.equal(elements.run.disabled, true);
 reply({type: 'models', id: sent.at(-1).id, models: [{model: 'first', displayName: 'First'}, {model: 'second', displayName: 'Second'}]});
+elements['git-refresh'].fire('click');
+assert.equal(sent.at(-1).type, 'git_snapshot');
+assert.equal(elements['git-refresh'].disabled, true);
+reply({type: 'git_snapshot', id: sent.at(-1).id, status: ' M src/app.py',
+  unstagedDiff: '+change', stagedDiff: ''});
+assert.equal(elements['git-status'].textContent, ' M src/app.py');
+assert.equal(elements['git-unstaged'].textContent, '+change');
+assert.equal(elements['git-staged'].textContent, '差分なし');
 assert.equal(elements.run.disabled, true, '送信前の明示選択が必要');
 elements.model.value = 'first';
 elements.model.fire('change');

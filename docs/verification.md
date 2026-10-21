@@ -201,3 +201,11 @@ Host自動試験12件、画面ロジック試験、JavaScript構文チェック�
 2026-10-21、Firefox経由の送信では`thread/start`時に`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`で停止した。Codexターンとコマンドは開始していない。端末のHost試験は`vscode (unconfined)` AppArmorプロファイルで成功したが、Firefox SnapのNative Messagingポータルが起動したHostは`unconfined`だった。`aa-exec -p unconfined`で同じ`bwrap`失敗を再現した。Ubuntu 24.04の`kernel.apparmor_restrict_unprivileged_userns=1`、`/usr/bin/bwrap`は存在するが`/etc/apparmor.d/bwrap-userns-restrict`は未導入。したがって、Firefoxと端末のAppArmor状態の差が直接の原因と判断した。
 
 OpenAI公式の[Sandbox](https://learn.chatgpt.com/docs/sandboxing)はUbuntu 24.04向けに`apparmor-profiles`と`apparmor-utils`を入れ、配布される`bwrap-userns-restrict`を`/etc/apparmor.d/`へ配置・読み込みする方法を示している。管理者権限が必要で、このセッションでは`sudo -n`がパスワードを要求したため未適用。ホスト全体のuserns制限を無効化する変更や、Codexの隔離を外す変更は行っていない。Native HostはこのエラーをLinux隔離の起動失敗として表示し、実行を終了する。
+
+その後ユーザーがXubuntuのFirefox画面から同じツール不使用の指示を再送し、「完了」と応答本文「Focodex接続成功」を確認した。修復時に実施したコマンドと`接続・実行情報`のprofile ID表示値は提供されていない。Hostは`activePermissionProfile.id=focodex-project`などを照合した後にのみ`turn/start`を送るため、画面の正常完了はHostの照合が通ったことを示す。ファイル境界・通信境界のFirefox経由の再検証ではない。
+
+## Codexから独立したGit状態・差分表示
+
+2026-10-21、Native Hostに`git_snapshot`を追加した。登録済みプロジェクトだけを対象に`/usr/bin/git`を引数配列で実行し、Codex App Serverは通さない。プロジェクトのリポジトリルートとGit管理ディレクトリを確認し、通常リポジトリと相互リンクのあるworktreeに対応する。Codex実行との排他、任意パス・任意コマンドの拒否、10秒・25万バイトの表示上限を設けた。環境の`GIT_*`値を除去し、グローバル・システム設定、fsmonitor、フック、外部diff、textconv、任意のGit pagerを使わない。フィルターとinclude設定を検出したリポジトリは表示を拒否する。
+
+模擬Host試験24件と画面ロジック試験が成功。実FocodexリポジトリでもNative Messaging形式のHost応答として状態307バイト、未ステージ差分23038バイト、ステージ済み差分0バイトを取得した。Firefox画面はまだ再読み込み・実機確認していない。ステージング・コミット・pushは未実装であり、Git変更操作の外部ヘルパーや認証経路は別途設計する。

@@ -10,3 +10,5 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 #operation-text { border: 1px solid; padding: .8rem; max-height: 18rem; overflow: auto; }
 #approval-warning { font-weight: bold; }
 .policy-notice { border-inline-start: .25rem solid currentColor; padding-inline-start: .7rem; }
+#git-panel { border-top: 1px solid currentColor; margin-top: 2rem; }
+#git-panel pre { border: 1px solid; padding: .8rem; max-height: 22rem; overflow: auto; }

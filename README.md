@@ -54,15 +54,17 @@ Native Hostは実行ID、Codex要求に紐付けた一時ID、項目ID、スレ�
 
 Firefoxを再起動すると一時拡張は再読み込みが必要。拡張コードの変更後も`about:debugging`から再読み込みする。
 
+画面下部の「Gitの状態と差分」では、選択中のプロジェクトについて「Git状態を取得」を押すと、変更ファイル一覧・未ステージ差分・ステージ済み差分を表示する。Codex App Serverを経由せず、Native Hostが読み取り専用のGitコマンドを実行する。通常リポジトリとGit worktreeを扱い、Git管理ディレクトリの実体を確認する。Codex実行中は取得しない。外部ヘルパーを設定したリポジトリや表示上限を超える差分はエラーにする。未追跡ファイルは状態一覧に出るが差分には含まれない。ステージング・コミット・pushはまだ利用できない。画面の実機確認はこれから。
+
 ## Linuxの`bwrap`とOS別の確認事項
 
 Codexのpermission profileはLinuxで`bubblewrap`と`seccomp`を使う。隔離を開始できない場合、Focodexは指示を実行せずエラーで終了する。端末からのHost試験とFirefox経由のNative Host試験は、起動元の権限が異なり得るため、両方確認する。[OpenAI公式：Sandbox](https://learn.chatgpt.com/docs/sandboxing)、[Permissions](https://learn.chatgpt.com/docs/permissions)
 
 ### Xubuntu 24.04（現在の開発機）
 
-2026-10-21、端末からのCodex CLI 0.163.0の一往復は成功した。一方、Snap版Firefoxから起動したNative Hostは`thread/start`時に`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`で失敗した。端末は`vscode (unconfined)`、Native Hostは`unconfined`というAppArmorの状態の差があり、`aa-exec -p unconfined`で同じ失敗を再現した。`/usr/bin/bwrap`は存在し、`kernel.apparmor_restrict_unprivileged_userns=1`、`bwrap-userns-restrict`プロファイルは未導入だった。Firefox経由でのprofile適用後の正常実行は未確認。
+2026-10-21、端末からのCodex CLI 0.163.0の一往復は成功した。Snap版Firefoxから起動したNative Hostは当初`thread/start`時に`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`で失敗した。端末は`vscode (unconfined)`、Native Hostは`unconfined`というAppArmorの状態の差があり、`aa-exec -p unconfined`で同じ失敗を再現した。`/usr/bin/bwrap`は存在し、当時は`kernel.apparmor_restrict_unprivileged_userns=1`、`bwrap-userns-restrict`プロファイルが未導入だった。その後ユーザーがFirefox画面から再試験し、「完了」と「Focodex接続成功」を確認した。画面の接続・実行情報は閉じたままのため、profile IDの表示値はこの試験では記録していない。Hostはprofile IDと作業ルートの照合に成功した場合だけターンを開始する。
 
-OpenAI公式がUbuntu 24.04向けに示す限定的な対処は次のとおり。管理者権限が必要で、まだ実施していない。実施後にFirefoxから再送し、`接続・実行情報`の`settings.activePermissionProfile.id`が`focodex-project`であることと正常応答を確認する。ホスト全体のuserns制限を無効化したり、Codexの隔離を外したりしない。
+OpenAI公式がUbuntu 24.04向けに示す限定的な対処は次のとおり。管理者権限が必要。ユーザーによる再試験時の具体的な実施内容は未記録なので、再現時の手順として残す。今後の確認では`接続・実行情報`の`settings.activePermissionProfile.id`が`focodex-project`であることも記録する。ホスト全体のuserns制限を無効化したり、Codexの隔離を外したりしない。
 
 ```bash
 sudo apt update

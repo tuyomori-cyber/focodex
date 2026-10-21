@@ -42,6 +42,15 @@
   <h2>応答全文</h2>
   <pre id="answer"></pre>
   <details><summary>接続・実行情報</summary><pre id="info"></pre></details>
+  <section id="git-panel">
+    <h2>Gitの状態と差分</h2>
+    <p>Git管理情報の読み取りはNative Hostが担当します。変更操作はまだ利用できません。</p>
+    <button id="git-refresh" type="button" disabled>Git状態を取得</button>
+    <p id="git-message" role="status"></p>
+    <h3>変更ファイル</h3><pre id="git-status"></pre>
+    <h3>未ステージの差分</h3><pre id="git-unstaged"></pre>
+    <h3>ステージ済みの差分</h3><pre id="git-staged"></pre>
+  </section>
   <p>タブを閉じると接続と今回の実行を終了します。既に行われたファイル変更は戻しません。履歴はこの画面を閉じると消えます。</p>
 </main>
 <script src="probe.js"></script>

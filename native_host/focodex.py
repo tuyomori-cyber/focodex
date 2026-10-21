@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import secrets
 import signal
@@ -19,6 +20,87 @@ MAX_TEXT = 160_000  # Keeps the UTF-8 native result below Firefox's 1 MiB limit.
 TIMEOUT = 180
 STOP_TIMEOUT = 5
 PERMISSION_PROFILE = 'focodex-project'
+GIT = '/usr/bin/git'
+MAX_GIT_OUTPUT = 250_000
+
+
+def git_read(project, *arguments):
+    env = {key: item for key, item in os.environ.items() if not key.startswith('GIT_')}
+    env.update({'PATH': '/usr/bin:/bin', 'GIT_CONFIG_NOSYSTEM': '1',
+                'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_OPTIONAL_LOCKS': '0',
+                'GIT_TERMINAL_PROMPT': '0', 'GIT_PAGER': 'cat'})
+    command = [GIT, '--no-pager', '--no-optional-locks', '-c', 'core.fsmonitor=false',
+               '-c', 'core.hooksPath=/dev/null', '-c', 'diff.external=',
+               '-c', 'color.ui=false', '-C', str(project), *arguments]
+    process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, start_new_session=True)
+    output_bytes = bytearray()
+    try:
+        with selectors.DefaultSelector() as reader:
+            reader.register(process.stdout, selectors.EVENT_READ)
+            deadline = time.monotonic() + 10
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError('Gitの読み取りが時間切れになりました。')
+                if not reader.select(remaining):
+                    raise ValueError('Gitの読み取りが時間切れになりました。')
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                output_bytes.extend(chunk)
+                if len(output_bytes) > MAX_GIT_OUTPUT:
+                    raise ValueError('Gitの出力が表示上限を超えました。')
+        process.wait(timeout=1)
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        process.stdout.close()
+    output = output_bytes.decode('utf-8', 'replace')
+    if process.returncode:
+        raise ValueError(f'Gitの読み取りに失敗しました: {output[:2000]}')
+    return output
+
+
+def git_snapshot(project):
+    project = Path(project).resolve(strict=True)
+    dotgit = project / '.git'
+    if not dotgit.exists() or dotgit.is_symlink():
+        raise ValueError('プロジェクト直下のGit管理情報を確認できません。')
+    top = Path(git_read(project, 'rev-parse', '--show-toplevel').strip()).resolve()
+    gitdir = Path(git_read(project, 'rev-parse', '--absolute-git-dir').strip()).resolve()
+    common = Path(git_read(project, 'rev-parse', '--path-format=absolute', '--git-common-dir').strip()).resolve()
+    if top != project:
+        raise ValueError('登録済みプロジェクトとGitリポジトリのルートが一致しません。')
+    if dotgit.is_dir():
+        valid = gitdir == dotgit.resolve() and common == gitdir
+    elif dotgit.is_file():
+        pointer = dotgit.read_text(encoding='utf-8', errors='replace').strip()
+        target = (project / pointer[8:]).resolve() if pointer.startswith('gitdir: ') else None
+        backlink = gitdir / 'gitdir'
+        valid = (target == gitdir and gitdir.parent.name == 'worktrees' and
+                 gitdir.parent.parent == common and backlink.is_file() and
+                 Path(backlink.read_text().strip()).resolve() == dotgit)
+    else:
+        valid = False
+    if not valid:
+        raise ValueError('Git管理ディレクトリの実体が一致しません。')
+    # Git may execute project-controlled filters, fsmonitors or diff helpers.
+    # Refuse these repositories until a dedicated helper policy is designed.
+    settings = git_read(project, 'config', '--list', '--null')
+    for entry in settings.split('\0'):
+        key = entry.split('\n', 1)[0].lower()
+        if (key.startswith(('filter.', 'include.', 'includeif.')) or
+                key == 'core.fsmonitor' and '\nfalse' not in entry or
+                key == 'diff.external' and '\n' in entry and entry.split('\n', 1)[1] or
+                re.match(r'^diff\.[^.]+\.(command|textconv)$', key)):
+            raise ValueError('外部ヘルパーを含むGit設定は現在の表示機能で扱えません。')
+    return {'status': git_read(project, 'status', '--short', '--untracked-files=all'),
+            'unstagedDiff': git_read(project, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--'),
+            'stagedDiff': git_read(project, 'diff', '--cached', '--no-ext-diff', '--no-textconv', '--no-color', '--')}
 
 
 def toml_value(value):
@@ -196,6 +278,21 @@ class Host:
             return
         if value.get('type') == 'respond':
             self.respond(value)
+            return
+        if value.get('type') == 'git_snapshot':
+            if self.process or self.cleanup_uncertain:
+                raise ValueError('Codex実行中または終了未確認のためGit状態を取得できません。')
+            _, projects = config()
+            project_id = value.get('projectId')
+            if not isinstance(project_id, str) or project_id not in projects:
+                raise ValueError('未登録のプロジェクトです。')
+            with CONFIG.with_suffix('.lock').open('a') as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise ValueError('別のFocodexタブで実行中です。')
+                snapshot = git_snapshot(projects[project_id]['path'])
+            send({'type': 'git_snapshot', 'id': request_id, **snapshot})
             return
         if value.get('type') not in ('run', 'models'):
             raise ValueError('未対応の操作です。')

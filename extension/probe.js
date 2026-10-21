@@ -108,8 +108,31 @@ function fetchModels() {
   }
   controls();
 }
-$("project").addEventListener("change", fetchModels);
+function fetchGitSnapshot() {
+  if (!port || busy || !$("project").value) return;
+  pendingId = crypto.randomUUID();
+  pendingKind = "git_snapshot";
+  busy = true;
+  $("git-message").textContent = "Git状態を取得中…";
+  try {
+    port.postMessage({type: "git_snapshot", id: pendingId, projectId: $("project").value});
+  } catch (error) {
+    busy = false;
+    pendingId = null;
+    pendingKind = null;
+    $("git-message").textContent = `Git取得エラー: ${error.message}`;
+  }
+  controls();
+}
+$("project").addEventListener("change", () => {
+  $("git-message").textContent = "";
+  $("git-status").textContent = "";
+  $("git-unstaged").textContent = "";
+  $("git-staged").textContent = "";
+  fetchModels();
+});
 $("refresh-models").addEventListener("click", fetchModels);
+$("git-refresh").addEventListener("click", fetchGitSnapshot);
 $("model").addEventListener("change", () => {
   try { localStorage.setItem(`focodex:model:${$("project").value}`, $("model").value); }
   catch { /* Selection still works when local storage is unavailable. */ }
@@ -120,6 +143,7 @@ function controls() {
   $("project").disabled = busy || !port || !$("project").options.length;
   $("model").disabled = busy || !port || $("model").options.length < 2;
   $("refresh-models").disabled = $("project").disabled;
+  $("git-refresh").disabled = busy || !port || !$("project").value;
   $("run").disabled = $("project").disabled || $("model").disabled || !$("model").value || !$("prompt").value.trim();
   $("stop").disabled = !port || !busy || pendingKind !== "run" || stopping;
   $("prompt").disabled = busy;
@@ -160,6 +184,14 @@ $("connect").addEventListener("click", () => {
       }
       $("status").textContent = "接続済み・待機";
       fetchModels();
+    } else if (message.type === "git_snapshot" && message.id === pendingId && pendingKind === "git_snapshot") {
+      busy = false;
+      pendingId = null;
+      pendingKind = null;
+      $("git-status").textContent = message.status || "変更なし";
+      $("git-unstaged").textContent = message.unstagedDiff || "差分なし";
+      $("git-staged").textContent = message.stagedDiff || "差分なし";
+      $("git-message").textContent = "取得完了";
     } else if (message.type === "models" && message.id === pendingId && pendingKind === "models") {
       busy = false;
       pendingId = null;
@@ -212,7 +244,11 @@ $("connect").addEventListener("click", () => {
       }
     } else if (message.type === "error") {
       // Validation errors do not cancel a different in-flight request.
-      $("status").textContent = `エラー: ${message.error}`;
+      if (message.id === pendingId && pendingKind === "git_snapshot") {
+        $("git-message").textContent = `Git取得エラー: ${message.error}`;
+      } else {
+        $("status").textContent = `エラー: ${message.error}`;
+      }
       if (message.id === stopRequestId) {
         stopping = false;
         stopRequestId = null;

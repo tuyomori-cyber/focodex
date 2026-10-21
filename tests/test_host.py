@@ -347,6 +347,49 @@ class HostTests(unittest.TestCase):
         self.assertEqual(probe.read_message(self.host)['type'], 'error')
         self.assertFalse(self.pid.exists())
 
+    def test_git_snapshot_reads_status_and_both_diffs(self):
+        root = Path(self.temp.name)
+        def git(*args):
+            subprocess.run(['git', '-C', str(root), *args], check=True, capture_output=True)
+        git('init', '-q')
+        note = root / 'note.txt'
+        note.write_text('base\n')
+        git('add', 'note.txt')
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base')
+        note.write_text('base\nstaged\n')
+        git('add', 'note.txt')
+        note.write_text('base\nstaged\nunstaged\n')
+        probe.write_message(self.host, {'type': 'git_snapshot', 'id': 'git-1', 'projectId': 'test'})
+        reply = probe.read_message(self.host)
+        self.assertEqual(reply['type'], 'git_snapshot')
+        self.assertIn('MM note.txt', reply['status'])
+        self.assertIn('+staged', reply['stagedDiff'])
+        self.assertIn('+unstaged', reply['unstagedDiff'])
+        marker = root / 'unsafe-helper-ran'
+        git('config', 'filter.unsafe.process', f'touch {marker}')
+        probe.write_message(self.host, {'type': 'git_snapshot', 'id': 'git-2', 'projectId': 'test'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'error')
+        self.assertFalse(marker.exists())
+
+    def test_git_snapshot_accepts_registered_worktree(self):
+        root = Path(self.temp.name)
+        source, worktree = root / 'source', root / 'worktree'
+        source.mkdir()
+        def git(*args):
+            subprocess.run(['git', '-C', str(source), *args], check=True, capture_output=True)
+        git('init', '-q')
+        (source / 'note.txt').write_text('base\n')
+        git('add', 'note.txt')
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base')
+        git('worktree', 'add', '-qb', 'test-worktree', str(worktree))
+        self.config.write_text(json.dumps({'codex': str(root / 'codex'), 'projects': {
+            'test': {'name': 'テスト', 'path': str(worktree)}}}))
+        (worktree / 'note.txt').write_text('base\nchanged\n')
+        probe.write_message(self.host, {'type': 'git_snapshot', 'id': 'git-wt', 'projectId': 'test'})
+        reply = probe.read_message(self.host)
+        self.assertEqual(reply['type'], 'git_snapshot')
+        self.assertIn('+changed', reply['unstagedDiff'])
+
     def test_duplicate_host_lock_and_disconnect_cleanup(self):
         self.run_prompt('hang')
         deadline = time.monotonic() + 3
