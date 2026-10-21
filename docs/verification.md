@@ -173,3 +173,19 @@ Host自動試験12件、画面ロジック試験、JavaScript構文チェック�
 | `gpt-6-luna`の実ターンから外部ファイルを読むコマンド | コマンド失敗。モデルも`FileNotFoundError`と報告 |
 
 一時プロジェクトと外部ファイルは試験後に削除した。Focodex Hostは引き続き従来の`workspaceWrite`を指定しており、通常のFirefox実行にこの隔離はまだ適用されていない。次はHostのprofile選択・有効設定照合とGit操作の扱いを実装する。参照：[OpenAI公式 permission profile](https://learn.chatgpt.com/docs/permissions)、[App Server](https://learn.chatgpt.com/docs/app-server)。
+
+## 子プロセス・シンボリックリンクルート・Git worktreeの境界検証
+
+2026-10-21、Codex CLI 0.163.0の一時permission profile（前節と同じ基本設定）を使い、Codex App Serverの`command/exec.permissionProfile`と`thread/start.permissions`を検証した。本番Hostは変更していない。全試験はリポジトリ内に作った一時プロジェクトと既知の一時外部ファイルだけを使い、終了後に削除した。初回のPythonスクリプト生成には引用符の誤りがあったため修正し、以下は修正後の結果である。
+
+| 経路 | 結果 |
+| --- | --- |
+| プロジェクト内`child.py` → `subprocess.run()` → 子Python | プロジェクト内書き込み成功。外部読み取りとTCP接続は失敗。外部書き込みの子プロセスは終了コード0だが実ファイルは不変 |
+| プロジェクト内`child.sh` → `cat` | 外部読み取り失敗。プロジェクト内書き込み成功 |
+| プロジェクト内`Makefile` → shell → `child.py` → 子Python | 直接実行と同じ隔離結果 |
+| `gpt-6-luna`の実ターン → `python3 child.py` | コマンドは終了コード0で、子プロセスの外部読み取り・通信が失敗し、外部実ファイルは不変 |
+| プロジェクトルートをシンボリックリンクに指定 | `activePermissionProfile`が適用され、リンク先プロジェクト内の書き込み成功。外部読み取りとプロジェクト内リンク経由の外部読み取りは失敗 |
+| Git worktreeをプロジェクトルートに指定 | ソース内の書き込み成功、外部読み取り失敗。ただし`git status`と`git add`は、worktree外にあるGit管理情報が見えず失敗 |
+| 通常Gitリポジトリで`git restore --worktree` | `.git/index.lock`を作れず失敗。試験用の変更ファイルは元に戻らなかった |
+
+これらの試験は、観測した子プロセス経路でもCodex標準profileの境界が維持されたことを示す。全ての開発ツールやGitコマンドを網羅した保証ではない。`rg`はこの環境ではホーム配下のVS Code拡張に置かれており、profile内の実モデルターンでは見つからなかった。通常のGitリポジトリで`.git`を読み取り専用にすると`git status`は使えるが、worktreeでは管理情報が外部にあるためCodex側のGit読み取りも利用できない。Git操作をHostに分離する設計と整合する一方、Hostはworktreeの管理ディレクトリの実体を検証して扱う必要がある。
