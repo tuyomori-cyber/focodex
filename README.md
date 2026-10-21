@@ -5,10 +5,10 @@ FirefoxからNative Messaging経由でCodexへ指示を1件送り、応答全文
 
 ## 前提
 
-- Linuxの通常インストール版Firefox、Python 3（標準ライブラリのみ）、Codex CLI。
+- Linux版Firefox、Python 3（標準ライブラリのみ）、Codex CLI。
 - 確認したCLI版：初回`0.145.0`、現在のpermission profile検証時`0.163.0`。異なる版ではapp-serverプロトコルの再確認が必要。
 - Firefoxを起動するユーザーでCodexの認証を済ませ、Firefoxで選択するモデルをその認証で利用できること。
-- Flatpak・Snap版FirefoxのHost配置／実行制約はこの検証の対象外。
+- Firefoxの導入形態によってNative Hostの起動環境が変わる。XubuntuのSnap版ではHost接続まで確認したが、permission profile適用後の一往復は下記の`bwrap`問題で未完了。
 
 ## Hostの登録
 
@@ -53,6 +53,27 @@ Native Hostは実行ID、Codex要求に紐付けた一時ID、項目ID、スレ�
 選択モデルは端末内でプロジェクトごとに保存する。一覧は候補であり、アカウントでの利用可否を保証しない。選択肢は固定せずCodexから取得する。
 
 Firefoxを再起動すると一時拡張は再読み込みが必要。拡張コードの変更後も`about:debugging`から再読み込みする。
+
+## Linuxの`bwrap`とOS別の確認事項
+
+Codexのpermission profileはLinuxで`bubblewrap`と`seccomp`を使う。隔離を開始できない場合、Focodexは指示を実行せずエラーで終了する。端末からのHost試験とFirefox経由のNative Host試験は、起動元の権限が異なり得るため、両方確認する。[OpenAI公式：Sandbox](https://learn.chatgpt.com/docs/sandboxing)、[Permissions](https://learn.chatgpt.com/docs/permissions)
+
+### Xubuntu 24.04（現在の開発機）
+
+2026-10-21、端末からのCodex CLI 0.163.0の一往復は成功した。一方、Snap版Firefoxから起動したNative Hostは`thread/start`時に`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`で失敗した。端末は`vscode (unconfined)`、Native Hostは`unconfined`というAppArmorの状態の差があり、`aa-exec -p unconfined`で同じ失敗を再現した。`/usr/bin/bwrap`は存在し、`kernel.apparmor_restrict_unprivileged_userns=1`、`bwrap-userns-restrict`プロファイルは未導入だった。Firefox経由でのprofile適用後の正常実行は未確認。
+
+OpenAI公式がUbuntu 24.04向けに示す限定的な対処は次のとおり。管理者権限が必要で、まだ実施していない。実施後にFirefoxから再送し、`接続・実行情報`の`settings.activePermissionProfile.id`が`focodex-project`であることと正常応答を確認する。ホスト全体のuserns制限を無効化したり、Codexの隔離を外したりしない。
+
+```bash
+sudo apt update
+sudo apt install apparmor-profiles apparmor-utils
+sudo install -m 0644 /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/bwrap-userns-restrict
+sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+```
+
+### Fedora（Surface実機）
+
+SurfaceのFedoraではまだFocodexのpermission profileを試していない。Ubuntu用のAppArmor手順はそのまま適用しない。まず`command -v bwrap`で確認し、ない場合はOpenAI公式のFedora向け手順`sudo dnf install bubblewrap`で導入する。その後、Codex CLI単体、Focodex Host、Firefox経由の順に、ツールを使わない一往復とプロジェクト内外の読み書き・通信の境界を実機確認する。Fedoraのセキュリティ設定やFirefoxの導入形態による差は現時点で不明であり、Xubuntuでの成功・失敗をSurfaceへ当てはめない。
 
 ## 今回の実装範囲
 
