@@ -1,18 +1,32 @@
 :root { color-scheme: light dark; font: 18px system-ui, sans-serif; }
 main { max-width: 850px; margin: 2rem auto; padding: 0 1rem; }
+h1 small { font-size: .55em; font-weight: normal; }
 label { display: block; margin-top: 1rem; }
 button, select, textarea { font: inherit; box-sizing: border-box; padding: .7rem; min-height: 48px; }
 select, textarea { width: 100%; }
 button { margin-top: .7rem; cursor: pointer; }
+#connect, #manage-workspaces, #help { border: 1px solid currentColor; border-radius: .5rem; background: transparent; }
+details { border: 1px solid currentColor; border-radius: .5rem; margin: 1rem 0; }
+summary { cursor: pointer; min-height: 48px; padding: .7rem; box-sizing: border-box; font-weight: bold; background: #e6f2ff; color: #102a43; border-radius: .5rem; }
+details[open] > summary { border-bottom: 1px solid; border-radius: .5rem .5rem 0 0; }
+details > form, details > section, details > pre { margin: 0; padding: 0 1rem 1rem; }
+details > details { margin: 1rem; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 #status { font-weight: bold; }
 #interaction { border: 2px solid currentColor; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
 #operation-text { border: 1px solid; padding: .8rem; max-height: 18rem; overflow: auto; }
 #approval-warning { font-weight: bold; }
 .policy-notice { border-inline-start: .25rem solid currentColor; padding-inline-start: .7rem; }
-#git-panel { border-top: 1px solid currentColor; margin-top: 2rem; }
+#git-panel { margin-top: 1rem; }
+#workspace-manager { border: 1px solid currentColor; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
+#repository-results { margin: .7rem 0; max-height: 18rem; overflow: auto; }
+#repository-results label { border: 1px solid currentColor; border-radius: .3rem; padding: .6rem; margin: .4rem 0; }
+#repository-results input { width: 1.2rem; height: 1.2rem; margin-inline-end: .5rem; vertical-align: middle; }
 #git-panel details { border: 1px solid; border-radius: .4rem; margin: .5rem 0; }
 #git-panel summary { cursor: pointer; min-height: 48px; padding: .7rem; box-sizing: border-box; overflow-wrap: anywhere; }
 #git-panel details[open] summary { border-bottom: 1px solid; }
 #git-panel h3 { margin: .8rem .8rem .3rem; font-size: 1rem; }
 #git-panel pre { margin: .3rem .8rem 1rem; max-height: 22rem; overflow: auto; }
+@media (prefers-color-scheme: dark) {
+  summary { background: #173b5c; color: #e7f3ff; }
+}

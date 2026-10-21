@@ -51,7 +51,11 @@ for line in sys.stdin:
         emit({'id': request['id'], 'result': {'thread': {'id': 'thread-1'},
              'model': params.get('model', 'inherited'), 'approvalPolicy': 'on-request',
              'activePermissionProfile': {'id': os.environ.get('FAKE_PROFILE', 'focodex-project')},
-             'runtimeWorkspaceRoots': [os.environ.get('FAKE_ROOT', os.getcwd())]}})
+             'runtimeWorkspaceRoots': [os.environ.get('FAKE_ROOT', os.getcwd())],
+             'sandbox': {'type': 'workspaceWrite', 'writableRoots':
+                         [os.environ['FAKE_EXTRA_ROOT']] if os.environ.get('FAKE_EXTRA_ROOT') else [],
+                         'networkAccess': False, 'excludeTmpdirEnvVar': True,
+                         'excludeSlashTmp': True}}})
     elif method == 'turn/start':
         assert set(params) == {'threadId', 'input'}
         text = params['input'][0]['text']
@@ -174,7 +178,9 @@ class HostTests(unittest.TestCase):
 
     def test_round_trip_and_repeated_run(self):
         probe.write_message(self.host, {'type': 'projects', 'id': 'p'})
-        self.assertEqual(probe.read_message(self.host)['projects'][0]['id'], 'test')
+        projects = probe.read_message(self.host)
+        self.assertEqual(projects['workspaces'][0]['id'], 'test')
+        self.assertEqual(projects['workspaces'][0]['projects'][0]['id'], 'test')
         for _ in range(2):
             self.assertEqual(self.run_prompt()['type'], 'started')
             result = self.result()
@@ -346,6 +352,69 @@ class HostTests(unittest.TestCase):
         probe.write_message(self.host, {'type': 'run', 'id': 'x', 'projectId': '../other', 'text': 'hello'})
         self.assertEqual(probe.read_message(self.host)['type'], 'error')
         self.assertFalse(self.pid.exists())
+
+    def test_workspace_allows_only_its_declared_projects(self):
+        root = Path(self.temp.name)
+        other_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(other_temp.cleanup)
+        other = Path(other_temp.name)
+        self.config.write_text(json.dumps({'codex': str(root / 'codex'), 'projects': {
+            'test': {'name': 'テスト', 'path': str(root)},
+            'other': {'name': '別', 'path': str(other)}}, 'workspaces': {
+            'both': {'name': '両方', 'projectIds': ['test', 'other'], 'defaultProjectId': 'test'}}}))
+        host = self.new_host({**self.env, 'FAKE_EXTRA_ROOT': str(other.resolve())})
+        probe.write_message(host, {'type': 'projects', 'id': 'p'})
+        reply = probe.read_message(host)
+        self.assertEqual(reply['workspaces'][0]['id'], 'both')
+        self.assertEqual([row['id'] for row in reply['workspaces'][0]['projects']], ['test', 'other'])
+        probe.write_message(host, {'type': 'run', 'id': 'run-1', 'workspaceId': 'both',
+                                   'projectId': 'test', 'text': 'hello'})
+        self.assertEqual(probe.read_message(host)['type'], 'started')
+        self.assertEqual(probe.read_message(host)['status'], 'completed')
+        probe.write_message(host, {'type': 'run', 'id': 'bad', 'workspaceId': 'both',
+                                   'projectId': 'missing', 'text': 'hello'})
+        self.assertEqual(probe.read_message(host)['type'], 'error')
+
+    def test_repository_discovery_and_workspace_save(self):
+        root = Path(self.temp.name)
+        discovery = root / 'repos'
+        alpha = discovery / 'alpha'
+        beta = discovery / 'group' / 'beta'
+        (alpha / '.git').mkdir(parents=True)
+        beta.mkdir(parents=True)
+        (beta / '.git').write_text('gitdir: /outside/worktrees/beta\n')
+        probe.write_message(self.host, {'type': 'discovery_root_add', 'id': 'add',
+                                        'path': str(discovery)})
+        added = probe.read_message(self.host)
+        self.assertEqual(added['type'], 'workspace_config')
+        self.assertEqual(added['discoveryRoots'], [str(discovery.resolve())])
+        probe.write_message(self.host, {'type': 'repository_scan', 'id': 'scan',
+                                        'root': str(discovery.resolve())})
+        scanned = probe.read_message(self.host)
+        self.assertEqual({row['path'] for row in scanned['repositories']},
+                         {str(alpha.resolve()), str(beta.resolve())})
+        self.assertEqual({row['kind'] for row in scanned['repositories']}, {'repository', 'worktree'})
+        probe.write_message(self.host, {'type': 'workspace_save', 'id': 'save',
+            'name': 'Found', 'projectPaths': [str(alpha.resolve()), str(beta.resolve())],
+            'defaultProjectPath': str(beta.resolve())})
+        saved = probe.read_message(self.host)
+        workspace = next(row for row in saved['workspaces']
+                         if [item['path'] for item in row['projects']] == [str(alpha.resolve()), str(beta.resolve())])
+        self.assertRegex(workspace['id'], r'^ws_[a-f0-9]{32}$')
+        self.assertEqual([row['path'] for row in workspace['projects']],
+                         [str(alpha.resolve()), str(beta.resolve())])
+        self.assertEqual(workspace['projects'][1]['id'], workspace['defaultProjectId'])
+        persisted = json.loads(self.config.read_text())
+        self.assertIn('discoveryRoots', persisted)
+        self.assertIn('workspaces', persisted)
+
+    def test_last_workspace_can_be_deleted(self):
+        probe.write_message(self.host, {'type': 'workspace_delete', 'id': 'delete', 'workspaceId': 'test'})
+        deleted = probe.read_message(self.host)
+        self.assertEqual(deleted['workspaces'], [])
+        persisted = json.loads(self.config.read_text())
+        self.assertEqual(persisted['workspaces'], {})
+        self.assertEqual(persisted['projects'], {})
 
     def test_git_snapshot_reads_status_and_both_diffs(self):
         root = Path(self.temp.name)

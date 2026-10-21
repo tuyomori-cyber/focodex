@@ -196,6 +196,30 @@ Host自動試験12件、画面ロジック試験、JavaScript構文チェック�
 
 模擬Host試験21件と画面ロジック試験が成功。実Codex CLI 0.163.0と`gpt-6-luna`によるHost一往復で「Focodex接続成功」を受信し、`activePermissionProfile.id=focodex-project`、作業ルートが選択プロジェクトのみ、`approvalPolicy=on-request`、専用プロセス群の消滅を確認した。この一往復はツールを使わないため、ファイル境界そのものの検証結果は前節の実験による。
 
+## 複数ワークスペースルートの検証
+
+2026-10-21、`scripts/verify_workspace_permissions.py`でCodex CLI 0.163.0を一時profileで起動した。既存のHost設定・Codex設定・既存リポジトリは変更していない。試験用のA・B・未登録CとCへ向くA内のシンボリックリンクは一時ディレクトリ内に作成し、終了時に削除した。
+
+profileの`workspace_roots`にはAとBを設定し、`thread/start.cwd`にはAを指定した。`permissionProfile/list`でprofileが`allowed: true`であることを確認し、`thread/start`でprofile IDと`approvalPolicy=on-request`を確認した。応答は`runtimeWorkspaceRoots=[A]`、`sandbox.type=workspaceWrite`、`sandbox.writableRoots=[B]`、`networkAccess=false`、一時ディレクトリ除外を返した。したがって、実行時の許可ルートは両配列の和集合として照合できる。
+
+| 試験 | 結果 |
+| --- | --- |
+| Aへの書き込み | 成功 |
+| Bへの書き込み・読み取り | 成功 |
+| 未登録Cの直接読み取り | 拒否（`No such file or directory`） |
+| A内のリンク経由でのC読み取り | 拒否（`No such file or directory`） |
+| 未登録Cへの書き込み | 拒否。ホスト側のCは不変 |
+
+`command/exec`の`command`は文字列ではなく引数配列を要求した。最初に送った`initialized` RPCはこのCLIのapp-serverで未対応だったため、検証スクリプトでは送らない。ワークスペース実装時は、Hostが使用するプロトコルの現行性を別途確認し、この結果だけを既存Hostの互換性証明とは扱わない。
+
+ワークスペース対応の実装後、`focodex`と`foxbook-control`を含む一時設定で実Hostを起動した。`focodex`を開始プロジェクトにして`gpt-6-luna`へツール未使用の一往復を送り、「Focodex接続成功」を受信した。Hostが返した設定は`runtimeWorkspaceRoots=[focodex]`、`sandbox.writableRoots=[foxbook-control]`、`workspaceWrite`、ネットワーク禁止、一時ディレクトリ除外、`activePermissionProfile.id=focodex-project`、`approvalPolicy=on-request`であり、実装した和集合照合を通過した。既存の`~/.config/focodex/config.json`は変更していない。Firefox経由の複数リポジトリ編集は未確認である。
+
+## リポジトリ検出とワークスペース管理
+
+Native Hostに検出ルート追加、深さ3・100件上限のリポジトリ検出、ワークスペース保存・削除の固定操作を追加した。検出では通常リポジトリの`.git`ディレクトリとworktreeの`.git`ファイルを識別するだけで、Git設定・フック・フィルターを実行しない。検出ルートはCodexのpermission profileへ渡さず、保存時に選択した作業ツリーだけを`projects`と`workspaces`へ登録する。設定ファイルはロック、一時ファイル、`fsync`、原子的置換で更新する。
+
+Host試験では、旧形式設定に検出ルートを追加し、通常リポジトリとworktreeを検出して新規ワークスペースへ保存する経路を確認した。画面ロジック試験では管理画面を開き、設定の取得と検出結果の表示を確認した。Firefox実機での管理画面操作は未確認である。
+
 ## Firefox Native Hostのbwrap起動失敗
 
 2026-10-21、Firefox経由の送信では`thread/start`時に`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`で停止した。Codexターンとコマンドは開始していない。端末のHost試験は`vscode (unconfined)` AppArmorプロファイルで成功したが、Firefox SnapのNative Messagingポータルが起動したHostは`unconfined`だった。`aa-exec -p unconfined`で同じ`bwrap`失敗を再現した。Ubuntu 24.04の`kernel.apparmor_restrict_unprivileged_userns=1`、`/usr/bin/bwrap`は存在するが`/etc/apparmor.d/bwrap-userns-restrict`は未導入。したがって、Firefoxと端末のAppArmor状態の差が直接の原因と判断した。

@@ -10,8 +10,10 @@ class Element {
   append(...options) { this.options.push(...options); if (this.options.length === options.length) this.value = options[0]?.value; }
   setAttribute() {}
 }
-const elements = Object.fromEntries(['connect', 'project', 'model', 'refresh-models', 'prompt', 'form', 'run', 'stop', 'status', 'diagnostics', 'interaction', 'interaction-title', 'interaction-details', 'approval-view', 'operation-label', 'operation-text', 'operation-cwd', 'approval-reason', 'approval-scope', 'approval-warning', 'questions', 'approve', 'decline', 'answer-question', 'answer', 'info', 'git-refresh', 'git-message', 'git-files'].map(id => [id, new Element()]));
+const elements = Object.fromEntries(['connect', 'manage-workspaces', 'help', 'help-panel', 'workspace-manager', 'manager-workspace', 'editing-workspace', 'discovery-root', 'new-discovery-root', 'add-discovery-root', 'scan-repositories', 'manager-message', 'repository-results', 'workspace-name-field', 'workspace-name', 'manager-default-project', 'save-workspace', 'delete-workspace', 'workspace-choice', 'workspace', 'workspace-members', 'project', 'model', 'refresh-models', 'prompt', 'form', 'run', 'stop', 'status', 'diagnostics', 'interaction', 'interaction-title', 'interaction-details', 'approval-view', 'operation-label', 'operation-text', 'operation-cwd', 'approval-reason', 'approval-scope', 'approval-warning', 'questions', 'approve', 'decline', 'answer-question', 'answer', 'info', 'response-panel', 'diff-panel', 'git-refresh', 'git-message', 'git-files'].map(id => [id, new Element()]));
 elements.prompt.value = '接続確認';
+elements['workspace-manager'].hidden = true;
+elements['help-panel'].hidden = true;
 const sent = [];
 const storage = new Map();
 const port = {
@@ -29,9 +31,29 @@ vm.runInNewContext(fs.readFileSync(new URL('../extension/probe.js', import.meta.
 });
 const reply = value => port.onMessage.emit(value);
 elements.connect.fire('click');
-reply({type: 'projects', id: sent.at(-1).id, projects: [{id: 'project', name: 'Project', path: '/project'}]});
-assert.equal(sent.at(-1).type, 'models');
+reply({type: 'projects', id: sent.at(-1).id, discoveryRoots: [], discoveryRootCandidates: ['/repos'], workspaces: [{id: 'workspace', name: 'Workspace', defaultProjectId: 'project', projects: [{id: 'project', name: 'Project', path: '/project'}, {id: 'other', name: 'Other', path: '/other'}]}]});
+assert.equal(sent.at(-1).type, 'projects');
+assert.match(elements['workspace-members'].textContent, /Project.*Other/);
+assert.equal(elements['workspace-choice'].hidden, false, '単独リポジトリ選択のため常に表示する');
+assert.equal(elements['delete-workspace'].disabled, false, '単独ワークスペースも管理画面から削除できる');
+assert.equal(elements['add-discovery-root'].disabled, false, 'モデル一覧取得前にも検出ルートを追加できる');
 assert.equal(elements.run.disabled, true);
+elements['manage-workspaces'].fire('click');
+assert.equal(elements['manager-workspace'].options[0].value, '__new__');
+assert.equal(elements['manager-workspace'].value, 'workspace');
+elements.help.fire('click');
+assert.equal(elements['help-panel'].hidden, false);
+assert.equal(elements['discovery-root'].value, '/repos');
+elements['scan-repositories'].fire('click');
+assert.equal(sent.at(-1).type, 'discovery_root_add');
+reply({type: 'workspace_config', id: sent.at(-1).id, discoveryRoots: ['/repos'], workspaces: [{id: 'workspace', name: 'Workspace', defaultProjectId: 'project', projects: [{id: 'project', name: 'Project', path: '/project'}, {id: 'other', name: 'Other', path: '/other'}]}]});
+assert.equal(sent.at(-1).type, 'repository_scan');
+reply({type: 'repository_scan', id: sent.at(-1).id, repositories: [{name: 'Discovered', path: '/repos/discovered', kind: 'repository'}]});
+assert.match(elements['manager-message'].textContent, /1件/);
+assert.equal(elements['save-workspace'].disabled, false, '検出結果の描画後に保存できる');
+elements['refresh-models'].fire('click');
+assert.equal(sent.at(-1).type, 'models');
+assert.equal(sent.at(-1).workspaceId, 'workspace');
 reply({type: 'models', id: sent.at(-1).id, models: [{model: 'first', displayName: 'First'}, {model: 'second', displayName: 'Second'}]});
 elements['git-refresh'].fire('click');
 assert.equal(sent.at(-1).type, 'git_snapshot');
@@ -40,6 +62,7 @@ reply({type: 'git_snapshot', id: sent.at(-1).id, files: [
   {path: 'src/app.py', status: ' M', unstagedDiff: '+change', stagedDiff: ''},
   {path: 'test.txt', status: '??', unstagedDiff: '+test', stagedDiff: ''}]});
 assert.equal(elements['git-files'].options.length, 2);
+assert.equal(elements['diff-panel'].open, true);
 assert.equal(elements['git-files'].options[0].open, false, '差分は初期状態で閉じる');
 assert.match(elements['git-files'].options[0].options[0].textContent, /src\/app.py.*変更/);
 assert.equal(elements['git-files'].options[0].options[2].textContent, '+change');
@@ -50,6 +73,7 @@ elements.model.fire('change');
 assert.equal(elements.run.disabled, false);
 elements.form.fire('submit');
 assert.equal(sent.at(-1).model, 'first');
+assert.equal(sent.at(-1).workspaceId, 'workspace');
 assert.equal(elements.model.disabled, true, '実行中の選択変更を防ぐ');
 reply({type: 'result', id: sent.at(-1).id, status: 'failed', error: 'model unavailable'});
 assert.equal(elements.model.disabled, false);
@@ -90,6 +114,7 @@ assert.match(elements.diagnostics.textContent, /専用プロセス群=確認不�
 elements.form.fire('submit');
 reply({type: 'result', id: sent.at(-1).id, status: 'completed', text: '成功'});
 assert.equal(elements.answer.textContent, '成功');
+assert.equal(elements['response-panel'].open, true);
 elements['refresh-models'].fire('click');
 reply({type: 'models', id: sent.at(-1).id, models: [{model: 'second'}]});
 assert.equal(elements.model.value, 'second', '保存した選択が一覧に残っていれば復元する');

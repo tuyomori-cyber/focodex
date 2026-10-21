@@ -23,7 +23,7 @@ Hostは`~/.local/lib/focodex/`にコピーし、Firefoxへの登録は`~/.mozill
 Pythonの実行パスも登録時に固定する。Hostのコードを変更したら再実行する。
 
 初回に`~/.config/focodex/config.json`を作成する。既存の設定は上書きしない。
-最初の登録対象はこの`focodex`リポジトリ。プロジェクトの追加・移動やCodexのパス変更は、この設定を手動編集する。
+最初の登録対象はこの`focodex`リポジトリ。旧形式の設定では各プロジェクトが単独ワークスペースとして扱われ、権限範囲は広がらない。複数リポジトリを同じ権限で扱う場合だけ、`workspaces`へ明示的に登録する。プロジェクトの追加・移動やCodexのパス変更は、この設定を手動編集する。
 
 ```json
 {
@@ -34,11 +34,32 @@ Pythonの実行パスも登録時に固定する。Hostのコードを変更し�
 }
 ```
 
+複数リポジトリの例：
+
+```json
+{
+  "codex": "/absolute/path/to/codex",
+  "projects": {
+    "focodex": {"name": "Focodex", "path": "/home/user/project/focodex"},
+    "voice": {"name": "Fox Voice Editor", "path": "/home/user/project/fox-voice-editor"}
+  },
+  "workspaces": {
+    "foxbook": {"name": "Foxbook", "projectIds": ["focodex", "voice"], "defaultProjectId": "focodex"}
+  }
+}
+```
+
+ワークスペースには明示登録したリポジトリだけが含まれる。共通親ディレクトリや未登録の兄弟リポジトリには権限を与えない。画面ではワークスペース、開始プロジェクト、許可対象一覧を確認してから送信する。Git状態表示は開始プロジェクトを対象にする。
+
+画面の「ワークスペースを管理」から検出ルートを追加し、その配下の配置済みGitリポジトリを発見・登録できる。検出ルートはリポジトリを探すためだけの場所であり、Codexのアクセス権限にはならない。通常画面の「単独リポジトリ」を選ぶと、検出済みのリポジトリ1件だけをその実行中の権限対象にできる。保存したワークスペースには選択したリポジトリだけが所属する。内部IDはFocodexが自動設定し、複数リポジトリをまとめる場合だけ名前を入力する。削除は最後の1件でも可能で、Focodex設定から除外するだけでフォルダやGit履歴は削除しない。
+
+管理画面の「編集するワークスペース」では、「新規作成」と既存ワークスペースを選べる。既存を選ぶと所属リポジトリがチェック済みで表示され、チェックを変えて保存すると構成を更新する。新規作成では全て未選択から始める。
+
 ## Firefoxでの検証
 
 1. `about:debugging#/runtime/this-firefox`を開き、「一時的なアドオンを読み込む」から`extension/manifest.json`を選ぶ。
 2. ツールバーの「Focodex 接続検証」を押して画面を開く。
-3. 「Hostへ接続」を押し、登録済みプロジェクトが表示されることを確認する。
+3. 「Hostへ接続」を押し、ワークスペース、開始プロジェクト、許可対象のリポジトリ一覧が表示されることを確認する。
 4. 自動取得された一覧からモデルを選び、初期入力済みの、ツール使用・ファイル変更を求めない指示を送信する。このPCでは`gpt-5.6-sol`で正常応答を確認済み。
 5. 「完了」と応答本文「Focodex接続成功」を確認する。「接続・実行情報」でstatus・threadId・turnId・適用モデル／権限を確認できる。
 6. 再送しても1件ずつ実行されることを確認する。モデル拒否が実際に起きた場合は、指示文を保持したまま別モデルを選んで再送できる。一覧取得に失敗した場合は「モデル一覧を再取得」で再試行できる。拒否されるモデルが候補にない場合、失敗後の再送は模擬試験の確認で足りる。
@@ -60,9 +81,9 @@ Firefoxを再起動すると一時拡張は再読み込みが必要。拡張コ�
 
 確認日：2026-10-21
 
-FocodexはCodex実行ごとに`focodex-project` permission profileをCLI起動引数で定義し、`thread/start.permissions`で選択する。プロジェクト内の読み書きと`.git`の読み取りを許可し、プロジェクト外の読み書き、`/tmp`と一時ディレクトリ、外部ネットワークは禁止する。汎用の権限拡大承認も許可しない。
+FocodexはCodex実行ごとに`focodex-project` permission profileをCLI起動引数で定義し、`thread/start.permissions`で選択する。選択したワークスペースの全リポジトリ内の読み書きと`.git`の読み取りを許可し、ワークスペース外の読み書き、`/tmp`と一時ディレクトリ、外部ネットワークは禁止する。汎用の権限拡大承認も許可しない。
 
-Native Hostはターン開始前に、Codexの応答に含まれる`activePermissionProfile.id`が`focodex-project`であること、実行ルートが選択プロジェクトだけであること、承認方針が`on-request`であることを照合する。いずれかが一致しなければ、Codexに指示を実行させない。permission profileと従来の`workspace-write` sandbox指定は併用しない。
+Native Hostはターン開始前に、Codexの応答に含まれる`activePermissionProfile.id`が`focodex-project`であること、開始プロジェクトの`runtimeWorkspaceRoots`と追加ルートの`sandbox.writableRoots`の和集合が選択ワークスペースと一致すること、承認方針が`on-request`であることを照合する。ネットワークと一時ディレクトリの制限も確認する。いずれかが一致しなければ、Codexに指示を実行させない。permission profileと従来の`workspace-write` sandbox指定は併用しない。
 
 CLI 0.163.0とapp-serverで、プロジェクト内の読み書き、プロジェクト外の既知ファイルの読み取り拒否、外部実ファイルへの書き込みが反映されないこと、外部通信の遮断を確認した。Python子プロセス、シェルスクリプト、Make経由のPython、プロジェクト内の外部向けシンボリックリンクにも同じ境界が適用された。通常リポジトリでは`.git`の読み取りは可能だが書き込みは失敗し、Git worktreeでは管理情報がプロジェクト外にあるためCodex側の`git status`も使えない。
 

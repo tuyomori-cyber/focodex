@@ -59,6 +59,7 @@ def close(process):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=Path)
+    parser.add_argument('--workspace', help='設定済みワークスペースID（旧形式では省略可）')
     parser.add_argument('--project', default='focodex')
     parser.add_argument('--model', help='一覧にあるモデルを明示選択')
     parser.add_argument('--list-models', action='store_true', help='モデル一覧の取得のみ行う')
@@ -74,7 +75,10 @@ if __name__ == '__main__':
             raise RuntimeError(message)
         print(json.dumps(message, ensure_ascii=False))
         if args.list_models or args.model:
-            write_message(process, {'type': 'models', 'id': 'models', 'projectId': args.project})
+            message = {'type': 'models', 'id': 'models', 'projectId': args.project}
+            if args.workspace:
+                message['workspaceId'] = args.workspace
+            write_message(process, message)
             while True:
                 message = read_message(process)
                 print(json.dumps(message, ensure_ascii=False))
@@ -86,6 +90,8 @@ if __name__ == '__main__':
                 sys.exit(0)
         request = {'type': 'run', 'id': 'probe', 'projectId': args.project,
             'text': 'ツールを使わず、ファイルの読み書きやコマンド実行をせずに、「Focodex接続成功」とだけ返答してください。'}
+        if args.workspace:
+            request['workspaceId'] = args.workspace
         if args.model:
             request['model'] = args.model
         write_message(process, request)

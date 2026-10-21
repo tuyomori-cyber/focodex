@@ -5,13 +5,49 @@
 <title>Focodex 接続検証</title>
 <link rel="stylesheet" href="probe.css">
 <main>
-  <h1>Focodex 接続検証</h1>
-  <p>プロジェクトを選び、指示を1件送信します。初回はファイル変更を伴わない指示で確認してください。</p>
-  <p>追加質問には画面から回答できます。汎用の操作承認は拒否のみ可能です。停止もできます。</p>
-  <p class="policy-notice">Codexにはプロジェクト内の読み書きだけを許可するpermission profileを適用します。有効なprofileを確認できない場合、指示を実行しません。</p>
+  <h1>Focodex 接続検証 <small>v0.1.10</small></h1>
   <button id="connect">Hostへ接続</button>
-  <form id="form">
-    <label for="project">プロジェクト</label>
+  <button id="manage-workspaces" type="button" disabled>ワークスペースを管理</button>
+  <button id="help" type="button" aria-expanded="false">ヘルプ</button>
+  <section id="help-panel" hidden>
+    <h2>ヘルプ</h2>
+    <p>ワークスペースと開始プロジェクトを選び、指示を1件送信します。初回はファイル変更を伴わない指示で確認してください。</p>
+    <p>追加質問には画面から回答できます。汎用の操作承認は拒否のみ可能です。停止もできます。</p>
+    <p class="policy-notice">Codexにはプロジェクト内の読み書きだけを許可するpermission profileを適用します。有効なprofileを確認できない場合、指示を実行しません。</p>
+    <p>Gitの状態と差分は開始プロジェクトを対象に読み取ります。変更操作は利用できません。タブを閉じると接続と今回の実行を終了し、画面の履歴は消えます。既に行われたファイル変更は戻しません。</p>
+  </section>
+  <section id="workspace-manager" hidden>
+    <h2>ワークスペース管理</h2>
+    <label for="manager-workspace">編集するワークスペース</label>
+    <select id="manager-workspace"></select>
+    <p id="editing-workspace" class="policy-notice"></p>
+    <p>検出ルートはリポジトリを探す場所です。選んで保存したリポジトリだけがCodexの権限対象になります。</p>
+    <label for="discovery-root">検出ルート</label>
+    <select id="discovery-root"></select>
+    <label for="new-discovery-root">検出ルートを追加</label>
+    <input id="new-discovery-root" type="text" inputmode="url" placeholder="/home/user/project">
+    <button id="add-discovery-root" type="button">検出ルートを追加</button>
+    <button id="scan-repositories" type="button">リポジトリを再検出</button>
+    <p id="manager-message" role="status"></p>
+    <div id="repository-results"></div>
+    <div id="workspace-name-field">
+      <label for="workspace-name">ワークスペース名</label>
+      <input id="workspace-name" type="text" maxlength="100">
+    </div>
+    <label for="manager-default-project">開始プロジェクト</label>
+    <select id="manager-default-project"></select>
+    <button id="save-workspace" type="button">選択したリポジトリを保存</button>
+    <button id="delete-workspace" type="button">選択中のワークスペースを設定から削除</button>
+  </section>
+  <details id="request-panel" open>
+    <summary>要求</summary>
+    <form id="form">
+    <div id="workspace-choice">
+      <label for="workspace">ワークスペース</label>
+      <select id="workspace" disabled></select>
+    </div>
+    <p id="workspace-members" class="policy-notice"></p>
+    <label for="project">開始プロジェクト</label>
     <select id="project" disabled></select>
     <label for="model">モデル</label>
     <select id="model" disabled><option value="">モデルを選択してください</option></select>
@@ -20,7 +56,8 @@
     <textarea id="prompt" rows="5" maxlength="20000">ツールを使わず、ファイルの読み書きやコマンド実行をせずに、「Focodex接続成功」とだけ返答してください。</textarea>
     <button id="run" disabled>Codexへ送信</button>
     <button id="stop" type="button" disabled>停止</button>
-  </form>
+    </form>
+  </details>
   <p id="status" role="status" aria-live="polite">未接続</p>
   <p id="diagnostics"></p>
   <section id="interaction" hidden>
@@ -39,17 +76,19 @@
     <button id="approve" type="button">今回だけ承認</button>
     <button id="answer-question" type="button">回答を送信</button>
   </section>
-  <h2>応答全文</h2>
-  <pre id="answer"></pre>
-  <details><summary>接続・実行情報</summary><pre id="info"></pre></details>
-  <section id="git-panel">
-    <h2>Gitの状態と差分</h2>
-    <p>Git管理情報の読み取りはNative Hostが担当します。変更操作はまだ利用できません。ファイル名をタップすると差分を表示します。</p>
+  <details id="response-panel">
+    <summary>応答</summary>
+    <pre id="answer"></pre>
+    <details><summary>接続・実行情報</summary><pre id="info"></pre></details>
+  </details>
+  <details id="diff-panel">
+    <summary>差分</summary>
+    <section id="git-panel">
     <button id="git-refresh" type="button" disabled>Git状態を取得</button>
     <p id="git-message" role="status"></p>
     <div id="git-files"></div>
-  </section>
-  <p>タブを閉じると接続と今回の実行を終了します。既に行われたファイル変更は戻しません。履歴はこの画面を閉じると消えます。</p>
+    </section>
+  </details>
 </main>
 <script src="probe.js"></script>
 </html>

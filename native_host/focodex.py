@@ -2,6 +2,7 @@
 """Linux-only, one-turn Codex Native Messaging proof of concept."""
 import difflib
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,7 +14,9 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 
 CONFIG = Path(os.environ.get('FOCODEX_CONFIG', Path.home() / '.config/focodex/config.json'))
 MAX_NATIVE = 128 * 1024
@@ -25,6 +28,9 @@ PERMISSION_PROFILE = 'focodex-project'
 GIT = '/usr/bin/git'
 MAX_GIT_OUTPUT = 250_000
 MAX_UNTRACKED_FILE = 100_000
+MAX_DISCOVERY_DEPTH = 3
+MAX_DISCOVERED_REPOSITORIES = 100
+SKIP_DISCOVERY_NAMES = {'.git', '.cache', 'node_modules', '.venv', 'venv', 'target', '__pycache__'}
 
 
 def git_read(project, *arguments):
@@ -208,9 +214,10 @@ def toml_value(value):
     raise TypeError('Unsupported permission profile value')
 
 
-def codex_args(executable):
+def codex_args(executable, workspace_roots):
     binary = str(Path(executable).resolve(strict=True))
-    profile = {'filesystem': {':root': 'deny', ':minimal': 'read',
+    profile = {'workspace_roots': {path: True for path in workspace_roots},
+               'filesystem': {':root': 'deny', ':minimal': 'read',
                               ':workspace_roots': {'.': 'write'},
                               ':tmpdir': 'deny', ':slash_tmp': 'deny',
                               binary: 'read'},
@@ -226,21 +233,213 @@ def send(message):
     sys.stdout.buffer.flush()
 
 
-def config():
-    data = json.loads(CONFIG.read_text())
+def read_config():
+    return json.loads(CONFIG.read_text())
+
+
+def write_config(data):
+    CONFIG.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix='.config.', dir=CONFIG.parent)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, CONFIG)
+        directory = os.open(CONFIG.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def config(data=None):
+    data = read_config() if data is None else data
     executable = data['codex']
     if not isinstance(executable, str) or not Path(executable).is_absolute() or not os.access(executable, os.X_OK):
         raise ValueError('設定のcodexには実行可能ファイルの絶対パスが必要です。')
     projects = data['projects']
-    if not isinstance(projects, dict) or not projects:
+    if not isinstance(projects, dict):
         raise ValueError('projectsにプロジェクトを登録してください。')
+    resolved = {}
     for key, value in projects.items():
         if not key or not isinstance(value, dict) or not isinstance(value.get('path'), str):
             raise ValueError('プロジェクト設定が不正です。')
         path = Path(value['path'])
         if not path.is_absolute() or not path.is_dir():
             raise ValueError(f'プロジェクトのディレクトリが見つかりません: {key}')
-    return executable, projects
+        resolved[key] = str(path.resolve(strict=True))
+    raw_workspaces = data.get('workspaces')
+    if raw_workspaces is None:
+        if not projects:
+            raise ValueError('projectsにプロジェクトを登録してください。')
+        workspaces = {key: {'name': item.get('name', key), 'projectIds': [key],
+                            'defaultProjectId': key} for key, item in projects.items()}
+    else:
+        if not isinstance(raw_workspaces, dict):
+            raise ValueError('workspacesの設定が不正です。')
+        workspaces = raw_workspaces
+    normalized = {}
+    for key, value in workspaces.items():
+        if (not isinstance(key, str) or not key or not isinstance(value, dict) or
+                not isinstance(value.get('projectIds'), list) or not value['projectIds']):
+            raise ValueError('ワークスペース設定が不正です。')
+        members = value['projectIds']
+        if (any(not isinstance(member, str) or member not in projects for member in members) or
+                len(set(members)) != len(members)):
+            raise ValueError(f'ワークスペースのプロジェクトIDが不正です: {key}')
+        default = value.get('defaultProjectId', members[0])
+        if default not in members:
+            raise ValueError(f'ワークスペースの開始プロジェクトが不正です: {key}')
+        paths = [resolved[member] for member in members]
+        for index, path in enumerate(paths):
+            for other in paths[index + 1:]:
+                if path == other or Path(path).is_relative_to(other) or Path(other).is_relative_to(path):
+                    raise ValueError(f'ワークスペース内のプロジェクト境界が重複しています: {key}')
+        normalized[key] = {'name': value.get('name', key), 'projectIds': members,
+                           'defaultProjectId': default, 'paths': paths}
+    return executable, projects, normalized
+
+
+def workspace_for(projects, workspaces, workspace_id, project_id):
+    # Old extension messages did not contain workspaceId.  They retain only the
+    # old single-project boundary, never an inferred multi-project boundary.
+    if workspace_id is None and project_id in workspaces and workspaces[project_id]['projectIds'] == [project_id]:
+        workspace_id = project_id
+    if not isinstance(workspace_id, str) or workspace_id not in workspaces:
+        raise ValueError('未登録のワークスペースです。')
+    workspace = workspaces[workspace_id]
+    if not isinstance(project_id, str) or project_id not in workspace['projectIds']:
+        raise ValueError('ワークスペースに属さないプロジェクトです。')
+    return workspace_id, workspace, str(Path(projects[project_id]['path']).resolve(strict=True))
+
+
+def discovery_root(path):
+    if not isinstance(path, str) or not path:
+        raise ValueError('検出ルートには絶対パスが必要です。')
+    candidate = Path(path)
+    if not candidate.is_absolute() or not candidate.is_dir() or candidate.is_symlink():
+        raise ValueError('検出ルートのディレクトリを確認できません。')
+    resolved = candidate.resolve(strict=True)
+    home = Path.home().resolve()
+    if resolved in (Path('/'), home):
+        raise ValueError('ルートディレクトリまたはホーム全体は検出ルートにできません。')
+    return str(resolved)
+
+
+def configured_discovery_roots(data, projects):
+    raw = data.get('discoveryRoots', [])
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list) or any(not isinstance(path, str) for path in raw):
+        raise ValueError('discoveryRootsの設定が不正です。')
+    roots = []
+    for path in raw:
+        root = discovery_root(path)
+        if root not in roots:
+            roots.append(root)
+    candidates = []
+    for project in projects.values():
+        parent = str(Path(project['path']).resolve(strict=True).parent)
+        try:
+            parent = discovery_root(parent)
+        except ValueError:
+            continue
+        if parent not in roots and parent not in candidates:
+            candidates.append(parent)
+    return roots, candidates
+
+
+def repository_kind(directory):
+    marker = directory / '.git'
+    if marker.is_dir() and not marker.is_symlink():
+        return 'repository'
+    if marker.is_file() and not marker.is_symlink():
+        return 'worktree'
+    return None
+
+
+def scan_repositories(root):
+    root = Path(discovery_root(root))
+    found = []
+    pending = [(root, 0)]
+    seen = set()
+    while pending:
+        directory, depth = pending.pop()
+        resolved = directory.resolve(strict=True)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        kind = repository_kind(resolved)
+        if kind:
+            found.append({'path': str(resolved), 'name': resolved.name, 'kind': kind})
+            if len(found) > MAX_DISCOVERED_REPOSITORIES:
+                raise ValueError('検出したリポジトリが上限を超えました。検出ルートを絞ってください。')
+            continue
+        if depth >= MAX_DISCOVERY_DEPTH:
+            continue
+        try:
+            entries = list(os.scandir(resolved))
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.startswith('.') or entry.name in SKIP_DISCOVERY_NAMES:
+                continue
+            try:
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            pending.append((Path(entry.path), depth + 1))
+    return sorted(found, key=lambda row: row['path'])
+
+
+def project_id_for(data, path):
+    projects = data.setdefault('projects', {})
+    for key, project in projects.items():
+        if str(Path(project['path']).resolve(strict=True)) == path:
+            return key
+    stem = re.sub(r'[^a-z0-9_-]+', '-', Path(path).name.lower()).strip('-') or 'project'
+    key = stem
+    index = 2
+    while key in projects:
+        key = f'{stem}-{index}'
+        index += 1
+    projects[key] = {'name': Path(path).name, 'path': path}
+    return key
+
+
+def workspace_id_for(data):
+    workspaces = data.setdefault('workspaces', {})
+    while True:
+        key = f'ws_{uuid.uuid4().hex}'
+        if key not in workspaces:
+            return key
+
+
+def standalone_projects(data, projects):
+    roots, _ = configured_discovery_roots(data, projects)
+    rows = {row['path']: row for root in roots for row in scan_repositories(root)}
+    return [{'id': 'repo_' + hashlib.sha256(path.encode()).hexdigest(), **row}
+            for path, row in sorted(rows.items())]
+
+
+def selected_workspace(data, projects, workspaces, workspace_id, project_id):
+    if workspace_id != '__standalone__':
+        return workspace_for(projects, workspaces, workspace_id, project_id)
+    rows = {row['id']: row for row in standalone_projects(data, projects)}
+    row = rows.get(project_id)
+    if row is None:
+        raise ValueError('検出済みリポジトリを選択してください。')
+    return workspace_id, {'paths': [row['path']]}, row['path']
 
 
 class Host:
@@ -258,6 +457,8 @@ class Host:
         self.started = 0
         self.prompt = ''
         self.cwd = ''
+        self.workspace_id = None
+        self.workspace_roots = []
         self.agent_version = None
         self.settings = {}
         self.operation = 'run'
@@ -351,15 +552,147 @@ class Host:
             self.rpc('turn/interrupt', {'threadId': self.thread_id, 'turnId': self.turn_id}, 5)
             self.interrupt_sent = True
 
+    def workspace_config_message(self, request_id, data=None, selected_workspace_id=None):
+        data = read_config() if data is None else data
+        _, projects, workspaces = config(data)
+        roots, candidates = configured_discovery_roots(data, projects)
+        message = {'type': 'workspace_config', 'id': request_id,
+              'discoveryRoots': roots, 'discoveryRootCandidates': candidates,
+              'standaloneProjects': standalone_projects(data, projects),
+              'workspaces': [
+                  {'id': key, 'name': item['name'], 'defaultProjectId': item['defaultProjectId'],
+                   'projects': [{'id': project_id, 'name': projects[project_id].get('name', project_id),
+                                 'path': str(Path(projects[project_id]['path']).resolve(strict=True))}
+                                for project_id in item['projectIds']]}
+                  for key, item in workspaces.items()]}
+        if selected_workspace_id is not None:
+            message['selectedWorkspaceId'] = selected_workspace_id
+        send(message)
+
+    def locked_config(self):
+        lock = CONFIG.with_suffix('.lock').open('a')
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            raise ValueError('別のFocodexタブで実行中です。')
+        return lock
+
     def command(self, value):
         if not isinstance(value, dict) or not isinstance(value.get('id'), str):
             raise ValueError('id付きのメッセージが必要です。')
         request_id = value['id']
         if value.get('type') == 'projects':
-            _, projects = config()
-            send({'type': 'projects', 'id': request_id, 'projects': [
-                {'id': key, 'name': item.get('name', key), 'path': item['path']}
-                for key, item in projects.items()]})
+            data = read_config()
+            _, projects, workspaces = config(data)
+            roots, candidates = configured_discovery_roots(data, projects)
+            send({'type': 'projects', 'id': request_id,
+                  'discoveryRoots': roots, 'discoveryRootCandidates': candidates,
+                  'standaloneProjects': standalone_projects(data, projects),
+                  'workspaces': [
+                {'id': key, 'name': item['name'], 'defaultProjectId': item['defaultProjectId'],
+                 'projects': [{'id': project_id, 'name': projects[project_id].get('name', project_id),
+                               'path': str(Path(projects[project_id]['path']).resolve(strict=True))}
+                              for project_id in item['projectIds']]}
+                for key, item in workspaces.items()]})
+            return
+        if value.get('type') == 'workspace_config':
+            if self.process or self.cleanup_uncertain:
+                raise ValueError('Codex実行中または終了未確認のため設定を変更できません。')
+            self.workspace_config_message(request_id)
+            return
+        if value.get('type') == 'discovery_root_add':
+            if self.process or self.cleanup_uncertain:
+                raise ValueError('Codex実行中または終了未確認のため設定を変更できません。')
+            root = discovery_root(value.get('path'))
+            lock = self.locked_config()
+            try:
+                data = read_config()
+                _, projects, current_workspaces = config(data)
+                roots, _ = configured_discovery_roots(data, projects)
+                if root not in roots:
+                    data['discoveryRoots'] = roots + [root]
+                    write_config(data)
+                self.workspace_config_message(request_id, data)
+            finally:
+                lock.close()
+            return
+        if value.get('type') == 'repository_scan':
+            if self.process or self.cleanup_uncertain:
+                raise ValueError('Codex実行中または終了未確認のため検出できません。')
+            data = read_config()
+            _, projects, _ = config(data)
+            roots, _ = configured_discovery_roots(data, projects)
+            root = discovery_root(value.get('root'))
+            if root not in roots:
+                raise ValueError('登録済みの検出ルートだけを走査できます。')
+            send({'type': 'repository_scan', 'id': request_id, 'root': root,
+                  'repositories': scan_repositories(root)})
+            return
+        if value.get('type') == 'workspace_save':
+            if self.process or self.cleanup_uncertain:
+                raise ValueError('Codex実行中または終了未確認のため設定を変更できません。')
+            workspace_id = value.get('workspaceId')
+            name = value.get('name')
+            paths = value.get('projectPaths')
+            default_path = value.get('defaultProjectPath')
+            if (workspace_id is not None and not isinstance(workspace_id, str) or
+                    not isinstance(name, str) or not name.strip() or len(name) > 100 or
+                    not isinstance(paths, list) or not paths or len(paths) > 20 or
+                    len(set(paths)) != len(paths) or not isinstance(default_path, str)):
+                raise ValueError('ワークスペースの保存内容が不正です。')
+            lock = self.locked_config()
+            try:
+                data = read_config()
+                _, projects, current_workspaces = config(data)
+                roots, _ = configured_discovery_roots(data, projects)
+                discovered = {row['path'] for root in roots for row in scan_repositories(root)}
+                existing = {str(Path(item['path']).resolve(strict=True)) for item in projects.values()}
+                resolved_paths = [str(Path(path).resolve(strict=True)) if isinstance(path, str) else '' for path in paths]
+                if (any(not path or path not in discovered and path not in existing for path in resolved_paths) or
+                        default_path not in paths):
+                    raise ValueError('検出済みまたは既存登録済みのリポジトリだけを保存できます。')
+                project_ids = [project_id_for(data, path) for path in resolved_paths]
+                default_id = project_ids[paths.index(default_path)]
+                if 'workspaces' not in data:
+                    data['workspaces'] = {key: {'name': item['name'], 'projectIds': item['projectIds'],
+                                                'defaultProjectId': item['defaultProjectId']}
+                                          for key, item in current_workspaces.items()}
+                if workspace_id is None:
+                    workspace_id = workspace_id_for(data)
+                elif workspace_id not in data['workspaces']:
+                    raise ValueError('更新対象のワークスペースが見つかりません。')
+                data['workspaces'][workspace_id] = {
+                    'name': name.strip(), 'projectIds': project_ids, 'defaultProjectId': default_id}
+                config(data)
+                write_config(data)
+                self.workspace_config_message(request_id, data, workspace_id)
+            finally:
+                lock.close()
+            return
+        if value.get('type') == 'workspace_delete':
+            if self.process or self.cleanup_uncertain:
+                raise ValueError('Codex実行中または終了未確認のため設定を変更できません。')
+            workspace_id = value.get('workspaceId')
+            lock = self.locked_config()
+            try:
+                data = read_config()
+                _, _, workspaces = config(data)
+                if not isinstance(workspace_id, str) or workspace_id not in workspaces:
+                    raise ValueError('削除対象のワークスペースが見つかりません。')
+                if 'workspaces' not in data:
+                    data['workspaces'] = {key: {'name': item['name'], 'projectIds': item['projectIds'],
+                                                'defaultProjectId': item['defaultProjectId']}
+                                          for key, item in workspaces.items()}
+                del data['workspaces'][workspace_id]
+                used = {project_id for item in data['workspaces'].values()
+                        for project_id in item['projectIds']}
+                data['projects'] = {key: item for key, item in data['projects'].items() if key in used}
+                config(data)
+                write_config(data)
+                self.workspace_config_message(request_id, data)
+            finally:
+                lock.close()
             return
         if value.get('type') == 'stop':
             if not self.process or self.operation != 'run' or value.get('targetId') != self.request_id:
@@ -376,7 +709,7 @@ class Host:
         if value.get('type') == 'git_snapshot':
             if self.process or self.cleanup_uncertain:
                 raise ValueError('Codex実行中または終了未確認のためGit状態を取得できません。')
-            _, projects = config()
+            _, projects, _ = config()
             project_id = value.get('projectId')
             if not isinstance(project_id, str) or project_id not in projects:
                 raise ValueError('未登録のプロジェクトです。')
@@ -394,18 +727,19 @@ class Host:
             raise ValueError('前回の専用プロセス群の終了を確認できません。再実行できません。')
         if self.process:
             raise ValueError('実行中です。同時実行は1件です。')
-        executable, projects = config()
+        data = read_config()
+        executable, projects, workspaces = config(data)
+        workspace_id = value.get('workspaceId')
         project_id = value.get('projectId')
-        if not isinstance(project_id, str) or project_id not in projects:
-            raise ValueError('未登録のプロジェクトです。')
+        workspace_id, workspace, cwd = selected_workspace(data, projects, workspaces, workspace_id, project_id)
         operation = value['type']
         prompt = value.get('text', '')
-        cwd = str(Path(projects[project_id]['path']).resolve())
         model = value.get('model')
         if operation == 'run':
             if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 20000:
                 raise ValueError('指示は1〜20000文字で入力してください。')
-            if model is not None and (not isinstance(model, str) or model not in self.catalogs.get(cwd, set())):
+            catalog_key = (workspace_id, cwd)
+            if model is not None and (not isinstance(model, str) or model not in self.catalogs.get(catalog_key, set())):
                 raise ValueError('モデル一覧を取得し、候補からモデルを選択してください。')
         self.lock = CONFIG.with_suffix('.lock').open('a')
         try:
@@ -415,11 +749,13 @@ class Host:
             self.lock = None
             raise ValueError('別のFocodexタブで実行中です。')
         self.cwd = cwd
+        self.workspace_id = workspace_id
+        self.workspace_roots = workspace['paths']
         self.operation, self.model = operation, model
         self.model_rows = []
         self.cursors = set()
         if operation == 'models':
-            self.catalogs.pop(cwd, None)
+            self.catalogs.pop((workspace_id, cwd), None)
         self.request_id, self.prompt = request_id, prompt
         self.messages = {}
         self.thread_id = self.turn_id = self.agent_version = None
@@ -434,7 +770,7 @@ class Host:
         self.started = time.monotonic()
         try:
             self.process = subprocess.Popen(
-                codex_args(executable), cwd=self.cwd,
+                codex_args(executable, self.workspace_roots), cwd=self.cwd,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
                 start_new_session=True, bufsize=0)
             self.selector.register(self.process.stdout, selectors.EVENT_READ, 'codex')
@@ -617,7 +953,7 @@ class Host:
                 self.rpc('model/list', {'limit': 100, 'includeHidden': False, 'cursor': cursor}, 4)
                 return
             rows = list({row['model']: row for row in self.model_rows if isinstance(row['model'], str)}.values())
-            self.catalogs[self.cwd] = {row['model'] for row in rows}
+            self.catalogs[(self.workspace_id, self.cwd)] = {row['model'] for row in rows}
             message = {'type': 'models', 'id': self.request_id, 'models': rows}
             self.cleanup()
             self.request_id = None
@@ -629,9 +965,18 @@ class Host:
                              ('model', 'approvalPolicy', 'approvalsReviewer', 'sandbox',
                               'activePermissionProfile', 'runtimeWorkspaceRoots')}
             active = result.get('activePermissionProfile')
+            sandbox = result.get('sandbox')
+            runtime = result.get('runtimeWorkspaceRoots')
+            roots = set(runtime) | set(sandbox.get('writableRoots', [])) if (
+                isinstance(runtime, list) and isinstance(sandbox, dict) and
+                isinstance(sandbox.get('writableRoots'), list)) else set()
             if (not isinstance(active, dict) or active.get('id') != PERMISSION_PROFILE or
                     result.get('approvalPolicy') != 'on-request' or
-                    result.get('runtimeWorkspaceRoots') != [self.cwd]):
+                    runtime != [self.cwd] or roots != set(self.workspace_roots) or
+                    not isinstance(sandbox, dict) or sandbox.get('type') != 'workspaceWrite' or
+                    sandbox.get('networkAccess') is not False or
+                    sandbox.get('excludeTmpdirEnvVar') is not True or
+                    sandbox.get('excludeSlashTmp') is not True):
                 self.finish('failed', 'Codexの有効な権限設定を確認できません。実行を開始しません。')
                 return
             self.rpc('turn/start', {'threadId': self.thread_id,
