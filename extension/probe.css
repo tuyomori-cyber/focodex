@@ -11,4 +11,8 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 #approval-warning { font-weight: bold; }
 .policy-notice { border-inline-start: .25rem solid currentColor; padding-inline-start: .7rem; }
 #git-panel { border-top: 1px solid currentColor; margin-top: 2rem; }
-#git-panel pre { border: 1px solid; padding: .8rem; max-height: 22rem; overflow: auto; }
+#git-panel details { border: 1px solid; border-radius: .4rem; margin: .5rem 0; }
+#git-panel summary { cursor: pointer; min-height: 48px; padding: .7rem; box-sizing: border-box; overflow-wrap: anywhere; }
+#git-panel details[open] summary { border-bottom: 1px solid; }
+#git-panel h3 { margin: .8rem .8rem .3rem; font-size: 1rem; }
+#git-panel pre { margin: .3rem .8rem 1rem; max-height: 22rem; overflow: auto; }

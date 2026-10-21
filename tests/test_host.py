@@ -365,16 +365,14 @@ class HostTests(unittest.TestCase):
         probe.write_message(self.host, {'type': 'git_snapshot', 'id': 'git-1', 'projectId': 'test'})
         reply = probe.read_message(self.host)
         self.assertEqual(reply['type'], 'git_snapshot')
-        self.assertIn('MM note.txt', reply['status'])
-        self.assertIn('?? 日本語.txt', reply['status'])
-        self.assertIn('+staged', reply['stagedDiff'])
-        self.assertIn('+unstaged', reply['unstagedDiff'])
-        self.assertIn('+untracked', reply['unstagedDiff'])
-        self.assertIn('未追跡: 日本語.txt', reply['unstagedDiff'])
-        self.assertIn('未追跡: no-newline.txt', reply['unstagedDiff'])
-        self.assertIn('\\ No newline at end of file', reply['unstagedDiff'])
-        self.assertIn('未追跡: outside-link', reply['unstagedDiff'])
-        self.assertIn('安全に読み取れない', reply['unstagedDiff'])
+        files = {row['path']: row for row in reply['files']}
+        self.assertEqual(files['note.txt']['status'], 'MM')
+        self.assertIn('+staged', files['note.txt']['stagedDiff'])
+        self.assertIn('+unstaged', files['note.txt']['unstagedDiff'])
+        self.assertEqual(files['日本語.txt']['status'], '??')
+        self.assertIn('+untracked', files['日本語.txt']['unstagedDiff'])
+        self.assertIn('\\ No newline at end of file', files['no-newline.txt']['unstagedDiff'])
+        self.assertIn('安全に読み取れない', files['outside-link']['unstagedDiff'])
         marker = root / 'unsafe-helper-ran'
         git('config', 'filter.unsafe.process', f'touch {marker}')
         probe.write_message(self.host, {'type': 'git_snapshot', 'id': 'git-2', 'projectId': 'test'})
@@ -398,7 +396,7 @@ class HostTests(unittest.TestCase):
         probe.write_message(self.host, {'type': 'git_snapshot', 'id': 'git-wt', 'projectId': 'test'})
         reply = probe.read_message(self.host)
         self.assertEqual(reply['type'], 'git_snapshot')
-        self.assertIn('+changed', reply['unstagedDiff'])
+        self.assertIn('+changed', reply['files'][0]['unstagedDiff'])
 
     def test_duplicate_host_lock_and_disconnect_cleanup(self):
         self.run_prompt('hang')

@@ -3,14 +3,14 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 class Element {
-  constructor() { this.value = ''; this.options = []; this.listeners = {}; this.disabled = false; this.textContent = ''; }
+  constructor() { this.value = ''; this.options = []; this.listeners = {}; this.disabled = false; this.textContent = ''; this.open = false; }
   addEventListener(name, callback) { this.listeners[name] = callback; }
   fire(name) { this.listeners[name]?.({preventDefault() {}}); }
   replaceChildren(...options) { this.options = options; this.value = options[0]?.value ?? ''; }
-  append(option) { this.options.push(option); if (this.options.length === 1) this.value = option.value; }
+  append(...options) { this.options.push(...options); if (this.options.length === options.length) this.value = options[0]?.value; }
   setAttribute() {}
 }
-const elements = Object.fromEntries(['connect', 'project', 'model', 'refresh-models', 'prompt', 'form', 'run', 'stop', 'status', 'diagnostics', 'interaction', 'interaction-title', 'interaction-details', 'approval-view', 'operation-label', 'operation-text', 'operation-cwd', 'approval-reason', 'approval-scope', 'approval-warning', 'questions', 'approve', 'decline', 'answer-question', 'answer', 'info', 'git-refresh', 'git-message', 'git-status', 'git-unstaged', 'git-staged'].map(id => [id, new Element()]));
+const elements = Object.fromEntries(['connect', 'project', 'model', 'refresh-models', 'prompt', 'form', 'run', 'stop', 'status', 'diagnostics', 'interaction', 'interaction-title', 'interaction-details', 'approval-view', 'operation-label', 'operation-text', 'operation-cwd', 'approval-reason', 'approval-scope', 'approval-warning', 'questions', 'approve', 'decline', 'answer-question', 'answer', 'info', 'git-refresh', 'git-message', 'git-files'].map(id => [id, new Element()]));
 elements.prompt.value = '接続確認';
 const sent = [];
 const storage = new Map();
@@ -36,11 +36,14 @@ reply({type: 'models', id: sent.at(-1).id, models: [{model: 'first', displayName
 elements['git-refresh'].fire('click');
 assert.equal(sent.at(-1).type, 'git_snapshot');
 assert.equal(elements['git-refresh'].disabled, true);
-reply({type: 'git_snapshot', id: sent.at(-1).id, status: ' M src/app.py',
-  unstagedDiff: '+change', stagedDiff: ''});
-assert.equal(elements['git-status'].textContent, ' M src/app.py');
-assert.equal(elements['git-unstaged'].textContent, '+change');
-assert.equal(elements['git-staged'].textContent, '差分なし');
+reply({type: 'git_snapshot', id: sent.at(-1).id, files: [
+  {path: 'src/app.py', status: ' M', unstagedDiff: '+change', stagedDiff: ''},
+  {path: 'test.txt', status: '??', unstagedDiff: '+test', stagedDiff: ''}]});
+assert.equal(elements['git-files'].options.length, 2);
+assert.equal(elements['git-files'].options[0].open, false, '差分は初期状態で閉じる');
+assert.match(elements['git-files'].options[0].options[0].textContent, /src\/app.py.*変更/);
+assert.equal(elements['git-files'].options[0].options[2].textContent, '+change');
+assert.match(elements['git-files'].options[1].options[0].textContent, /test.txt.*未追跡/);
 assert.equal(elements.run.disabled, true, '送信前の明示選択が必要');
 elements.model.value = 'first';
 elements.model.fire('change');

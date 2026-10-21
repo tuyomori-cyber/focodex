@@ -91,6 +91,41 @@ function savedModel() {
 function clearModels() {
   $("model").replaceChildren(new Option("モデルを選択してください", ""));
 }
+function gitStatusLabel(code) {
+  if (code === "??") return "未追跡";
+  const labels = {M: "変更", A: "追加", D: "削除", R: "名前変更", C: "コピー", U: "競合"};
+  return [...new Set([...code].filter(char => char !== " ").map(char => labels[char] || char))].join("・") || "変更";
+}
+function showGitFiles(files) {
+  $("git-files").replaceChildren();
+  if (!files.length) {
+    $("git-files").textContent = "変更なし";
+    return;
+  }
+  $("git-files").textContent = "";
+  for (const file of files) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = `${file.path} — ${gitStatusLabel(file.status)}` +
+      (file.originalPath ? `（元: ${file.originalPath}）` : "");
+    details.append(summary);
+    for (const [title, diff] of [["未ステージ・未追跡", file.unstagedDiff],
+                                  ["ステージ済み", file.stagedDiff]]) {
+      if (!diff) continue;
+      const heading = document.createElement("h3");
+      heading.textContent = title;
+      const pre = document.createElement("pre");
+      pre.textContent = diff;
+      details.append(heading, pre);
+    }
+    if (!file.unstagedDiff && !file.stagedDiff) {
+      const note = document.createElement("p");
+      note.textContent = "表示できるテキスト差分はありません。";
+      details.append(note);
+    }
+    $("git-files").append(details);
+  }
+}
 function fetchModels() {
   if (!port || busy || !$("project").value) return;
   clearModels();
@@ -114,6 +149,7 @@ function fetchGitSnapshot() {
   pendingKind = "git_snapshot";
   busy = true;
   $("git-message").textContent = "Git状態を取得中…";
+  $("git-files").replaceChildren();
   try {
     port.postMessage({type: "git_snapshot", id: pendingId, projectId: $("project").value});
   } catch (error) {
@@ -126,9 +162,7 @@ function fetchGitSnapshot() {
 }
 $("project").addEventListener("change", () => {
   $("git-message").textContent = "";
-  $("git-status").textContent = "";
-  $("git-unstaged").textContent = "";
-  $("git-staged").textContent = "";
+  $("git-files").replaceChildren();
   fetchModels();
 });
 $("refresh-models").addEventListener("click", fetchModels);
@@ -188,9 +222,7 @@ $("connect").addEventListener("click", () => {
       busy = false;
       pendingId = null;
       pendingKind = null;
-      $("git-status").textContent = message.status || "変更なし";
-      $("git-unstaged").textContent = message.unstagedDiff || "差分なし";
-      $("git-staged").textContent = message.stagedDiff || "差分なし";
+      showGitFiles(Array.isArray(message.files) ? message.files : []);
       $("git-message").textContent = "取得完了";
     } else if (message.type === "models" && message.id === pendingId && pendingKind === "models") {
       busy = false;

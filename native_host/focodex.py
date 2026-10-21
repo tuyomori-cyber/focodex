@@ -117,19 +117,30 @@ def project_file_preview(project, name):
     return ''.join(lines)
 
 
-def untracked_preview(project, budget):
-    names = git_read(project, 'ls-files', '--others', '--exclude-standard', '-z').split('\0')
-    output = []
-    used = 0
-    for name in filter(None, names):
-        preview = f'未追跡: {name}\n' + project_file_preview(project, name) + '\n'
-        size = len(preview.encode('utf-8'))
-        if used + size > budget:
-            output.append('未追跡ファイルの残りは表示上限のため省略しました。\n')
-            break
-        output.append(preview)
-        used += size
-    return ''.join(output)
+def git_changed_files(project):
+    records = git_read(project, 'status', '--porcelain=v1', '-z', '--untracked-files=all').split('\0')
+    files = []
+    index = 0
+    while index < len(records) and records[index]:
+        record = records[index]
+        if len(record) < 4 or record[2] != ' ':
+            raise ValueError('Git状態の形式を確認できません。')
+        code, name = record[:2], record[3:]
+        original = None
+        if 'R' in code or 'C' in code:
+            index += 1
+            if index >= len(records) or not records[index]:
+                raise ValueError('Gitの移動元を確認できません。')
+            original = records[index]
+        names = (name, original) if original else (name,)
+        if any(not path or path.startswith('/') or '\ufffd' in path or
+               any(part in ('', '.', '..') for part in path.split('/')) for path in names):
+            raise ValueError('Gitの変更ファイル名を確認できません。')
+        files.append((code, name, original))
+        if len(files) > 100:
+            raise ValueError('変更ファイルが100件を超えたため表示できません。')
+        index += 1
+    return files
 
 
 def git_snapshot(project):
@@ -165,12 +176,25 @@ def git_snapshot(project):
                 key == 'diff.external' and '\n' in entry and entry.split('\n', 1)[1] or
                 re.match(r'^diff\.[^.]+\.(command|textconv)$', key)):
             raise ValueError('外部ヘルパーを含むGit設定は現在の表示機能で扱えません。')
-    unstaged = git_read(project, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--')
-    remaining = MAX_GIT_OUTPUT - len(unstaged.encode('utf-8'))
-    untracked = untracked_preview(project, remaining)
-    return {'status': git_read(project, 'status', '--short', '--untracked-files=all'),
-            'unstagedDiff': unstaged + ('\n' if unstaged and untracked else '') + untracked,
-            'stagedDiff': git_read(project, 'diff', '--cached', '--no-ext-diff', '--no-textconv', '--no-color', '--')}
+    rows = []
+    used = 0
+    for code, name, original in git_changed_files(project):
+        paths = [':(literal)' + name] + ([':(literal)' + original] if original else [])
+        if code == '??':
+            unstaged = project_file_preview(project, name)
+            staged = ''
+        else:
+            unstaged = git_read(project, 'diff', '--no-ext-diff', '--no-textconv',
+                                '--no-color', '--', *paths)
+            staged = git_read(project, 'diff', '--cached', '--no-ext-diff',
+                              '--no-textconv', '--no-color', '--', *paths)
+        row = {'path': name, 'status': code, 'originalPath': original,
+               'unstagedDiff': unstaged, 'stagedDiff': staged}
+        used += len(json.dumps(row, ensure_ascii=False).encode('utf-8'))
+        if used > MAX_GIT_OUTPUT:
+            raise ValueError('Git差分の合計が表示上限を超えました。')
+        rows.append(row)
+    return {'files': rows}
 
 
 def toml_value(value):
