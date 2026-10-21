@@ -56,6 +56,18 @@ Firefoxを再起動すると一時拡張は再読み込みが必要。拡張コ�
 
 画面下部の「Gitの状態と差分」では、選択中のプロジェクトについて「Git状態を取得」を押すと、変更ファイル名を一覧表示する。各ファイル名をタップすると、そのファイルの未ステージ・未追跡差分とステージ済み差分を開く。Codex App Serverを経由せず、Native Hostが読み取り専用のGitコマンドを実行する。通常リポジトリとGit worktreeを扱い、Git管理ディレクトリの実体を確認する。Codex実行中は取得しない。外部ヘルパーを設定したリポジトリや表示上限を超える差分はエラーにする。未追跡ファイルのプレビューはプロジェクト内の通常ファイルかつUTF-8テキストに限り、1ファイル10万バイトまで表示する。ステージング・コミット・pushはまだ利用できない。XubuntuのFirefox画面で取得完了と未追跡の`test.txt`の表示を確認済み。ファイル単位の展開表示は画面で未確認。
 
+## permission profileの適用状態と確認結果
+
+確認日：2026-10-21
+
+FocodexはCodex実行ごとに`focodex-project` permission profileをCLI起動引数で定義し、`thread/start.permissions`で選択する。プロジェクト内の読み書きと`.git`の読み取りを許可し、プロジェクト外の読み書き、`/tmp`と一時ディレクトリ、外部ネットワークは禁止する。汎用の権限拡大承認も許可しない。
+
+Native Hostはターン開始前に、Codexの応答に含まれる`activePermissionProfile.id`が`focodex-project`であること、実行ルートが選択プロジェクトだけであること、承認方針が`on-request`であることを照合する。いずれかが一致しなければ、Codexに指示を実行させない。permission profileと従来の`workspace-write` sandbox指定は併用しない。
+
+CLI 0.163.0とapp-serverで、プロジェクト内の読み書き、プロジェクト外の既知ファイルの読み取り拒否、外部実ファイルへの書き込みが反映されないこと、外部通信の遮断を確認した。Python子プロセス、シェルスクリプト、Make経由のPython、プロジェクト内の外部向けシンボリックリンクにも同じ境界が適用された。通常リポジトリでは`.git`の読み取りは可能だが書き込みは失敗し、Git worktreeでは管理情報がプロジェクト外にあるためCodex側の`git status`も使えない。
+
+XubuntuのFirefox経由では、profile適用後にCodexがプロジェクト内の`test.txt`を作成して正常終了することを確認した。これはHostのprofile照合が通ったことを示す。一方、Firefox経由でプロジェクト外読み取りの失敗と外部通信の失敗を改めて実演したわけではない。これらはCLIとapp-serverで確認済みであり、Firefoxも同じHost設定を使う。SurfaceのFedoraでは、Firefox経由を含む境界試験を別途行う。
+
 ## Linuxの`bwrap`とOS別の確認事項
 
 Codexのpermission profileはLinuxで`bubblewrap`と`seccomp`を使う。隔離を開始できない場合、Focodexは指示を実行せずエラーで終了する。端末からのHost試験とFirefox経由のNative Host試験は、起動元の権限が異なり得るため、両方確認する。[OpenAI公式：Sandbox](https://learn.chatgpt.com/docs/sandboxing)、[Permissions](https://learn.chatgpt.com/docs/permissions)
