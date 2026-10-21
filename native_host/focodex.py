@@ -18,6 +18,30 @@ MAX_RPC = 8 * 1024 * 1024
 MAX_TEXT = 160_000  # Keeps the UTF-8 native result below Firefox's 1 MiB limit.
 TIMEOUT = 180
 STOP_TIMEOUT = 5
+PERMISSION_PROFILE = 'focodex-project'
+
+
+def toml_value(value):
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, dict):
+        return '{' + ', '.join(f'{json.dumps(key)} = {toml_value(item)}'
+                               for key, item in value.items()) + '}'
+    raise TypeError('Unsupported permission profile value')
+
+
+def codex_args(executable):
+    binary = str(Path(executable).resolve(strict=True))
+    profile = {'filesystem': {':root': 'deny', ':minimal': 'read',
+                              ':workspace_roots': {'.': 'write'},
+                              ':tmpdir': 'deny', ':slash_tmp': 'deny',
+                              binary: 'read'},
+               'network': {'enabled': False}}
+    return [executable, '-c', f'default_permissions={json.dumps(PERMISSION_PROFILE)}',
+            '-c', f'permissions.{PERMISSION_PROFILE}={toml_value(profile)}',
+            'app-server', '--listen', 'stdio://']
 
 
 def send(message):
@@ -219,12 +243,13 @@ class Host:
         self.started = time.monotonic()
         try:
             self.process = subprocess.Popen(
-                [executable, 'app-server', '--listen', 'stdio://'], cwd=self.cwd,
+                codex_args(executable), cwd=self.cwd,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
                 start_new_session=True, bufsize=0)
             self.selector.register(self.process.stdout, selectors.EVENT_READ, 'codex')
             self.rpc('initialize', {'clientInfo': {'name': 'focodex_probe',
-                     'title': 'Focodex connection probe', 'version': '0.1.1'}}, 1)
+                     'title': 'Focodex connection probe', 'version': '0.1.1'},
+                     'capabilities': {'experimentalApi': True}}, 1)
         except Exception:
             self.cleanup()
             self.request_id = None
@@ -376,7 +401,7 @@ class Host:
                 self.rpc('model/list', {'limit': 100, 'includeHidden': False}, 4)
             else:
                 params = {'cwd': self.cwd, 'ephemeral': True,
-                          'sandbox': 'workspace-write', 'approvalPolicy': 'on-request'}
+                          'permissions': PERMISSION_PROFILE, 'approvalPolicy': 'on-request'}
                 if self.model is not None:
                     params['model'] = self.model
                 self.rpc('thread/start', params, 2)
@@ -406,17 +431,16 @@ class Host:
             result = value['result']
             self.thread_id = result['thread']['id']
             self.settings = {key: result.get(key) for key in
-                             ('model', 'approvalPolicy', 'approvalsReviewer', 'sandbox')}
-            sandbox_type = result.get('sandbox', {}).get('type') if isinstance(result.get('sandbox'), dict) else None
-            if sandbox_type != 'workspaceWrite' or result.get('approvalPolicy') != 'on-request':
+                             ('model', 'approvalPolicy', 'approvalsReviewer', 'sandbox',
+                              'activePermissionProfile', 'runtimeWorkspaceRoots')}
+            active = result.get('activePermissionProfile')
+            if (not isinstance(active, dict) or active.get('id') != PERMISSION_PROFILE or
+                    result.get('approvalPolicy') != 'on-request' or
+                    result.get('runtimeWorkspaceRoots') != [self.cwd]):
                 self.finish('failed', 'Codexの有効な権限設定を確認できません。実行を開始しません。')
                 return
-            sandbox = {'type': 'workspaceWrite', 'writableRoots': [],
-                       'networkAccess': False, 'excludeSlashTmp': True,
-                       'excludeTmpdirEnvVar': True}
             self.rpc('turn/start', {'threadId': self.thread_id,
-                     'input': [{'type': 'text', 'text': self.prompt}],
-                     'sandboxPolicy': sandbox, 'approvalPolicy': 'on-request'}, 3)
+                     'input': [{'type': 'text', 'text': self.prompt}]}, 3)
         elif value.get('id') == 3:
             turn_id = value['result']['turn']['id']
             if self.turn_id and self.turn_id != turn_id:

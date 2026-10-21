@@ -189,3 +189,9 @@ Host自動試験12件、画面ロジック試験、JavaScript構文チェック�
 | 通常Gitリポジトリで`git restore --worktree` | `.git/index.lock`を作れず失敗。試験用の変更ファイルは元に戻らなかった |
 
 これらの試験は、観測した子プロセス経路でもCodex標準profileの境界が維持されたことを示す。全ての開発ツールやGitコマンドを網羅した保証ではない。`rg`はこの環境ではホーム配下のVS Code拡張に置かれており、profile内の実モデルターンでは見つからなかった。通常のGitリポジトリで`.git`を読み取り専用にすると`git status`は使えるが、worktreeでは管理情報が外部にあるためCodex側のGit読み取りも利用できない。Git操作をHostに分離する設計と整合する一方、Hostはworktreeの管理ディレクトリの実体を検証して扱う必要がある。
+
+## Native Hostへの標準適用
+
+2026-10-21、Hostの`run`経路をCLI起動引数で定義した`focodex-project` permission profileへ切り替えた。`initialize.capabilities.experimentalApi=true`を送り、`thread/start.permissions`でprofileを選択する。従来の`thread/start.sandbox`と`turn/start.sandboxPolicy`は送らない。`activePermissionProfile.id`、`runtimeWorkspaceRoots`、`approvalPolicy`が期待値と異なる場合は`turn/start`前に終了する。Codex実行ファイルの実体パスは読み取り例外に含める。
+
+模擬Host試験21件と画面ロジック試験が成功。実Codex CLI 0.163.0と`gpt-6-luna`によるHost一往復で「Focodex接続成功」を受信し、`activePermissionProfile.id=focodex-project`、作業ルートが選択プロジェクトのみ、`approvalPolicy=on-request`、専用プロセス群の消滅を確認した。この一往復はツールを使わないため、ファイル境界そのものの検証結果は前節の実験による。

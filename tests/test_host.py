@@ -17,6 +17,12 @@ FAKE = '''#!/usr/bin/env python3
 import json, os, sys, time
 from pathlib import Path
 Path(os.environ['FAKE_PID']).write_text(str(os.getpid()))
+assert sys.argv[1:3] == ['-c', 'default_permissions="focodex-project"'], sys.argv
+assert sys.argv[3] == '-c' and sys.argv[4].startswith('permissions.focodex-project='), sys.argv
+assert sys.argv[5:] == ['app-server', '--listen', 'stdio://'], sys.argv
+assert '\":root\" = \"deny\"' in sys.argv[4], sys.argv[4]
+assert '\":workspace_roots\" = {\".\" = \"write\"}' in sys.argv[4], sys.argv[4]
+assert '\"enabled\" = false' in sys.argv[4], sys.argv[4]
 def emit(value):
     print(json.dumps(value), flush=True)
 pending = None
@@ -25,6 +31,7 @@ for line in sys.stdin:
     method = request.get('method')
     params = request.get('params')
     if method == 'initialize':
+        assert params['capabilities'] == {'experimentalApi': True}
         emit({'id': request['id'], 'result': {'userAgent': 'fake/0.145.0'}})
     elif method == 'model/list':
         assert params['includeHidden'] is False
@@ -37,18 +44,16 @@ for line in sys.stdin:
             emit({'id': request['id'], 'result': {'data': [
                 {'model': 'test-second', 'displayName': 'Second', 'isDefault': False}], 'nextCursor': None}})
     elif method == 'thread/start':
-        assert set(params) in ({'cwd', 'ephemeral', 'sandbox', 'approvalPolicy'}, {'cwd', 'ephemeral', 'model', 'sandbox', 'approvalPolicy'}), params
-        assert params['sandbox'] == 'workspace-write'
+        assert set(params) in ({'cwd', 'ephemeral', 'permissions', 'approvalPolicy'}, {'cwd', 'ephemeral', 'model', 'permissions', 'approvalPolicy'}), params
+        assert params['permissions'] == 'focodex-project'
         assert params['approvalPolicy'] == 'on-request'
         assert params['cwd'] == os.getcwd()
         emit({'id': request['id'], 'result': {'thread': {'id': 'thread-1'},
              'model': params.get('model', 'inherited'), 'approvalPolicy': 'on-request',
-             'sandbox': {'type': os.environ.get('FAKE_SANDBOX', 'workspaceWrite')}}})
+             'activePermissionProfile': {'id': os.environ.get('FAKE_PROFILE', 'focodex-project')},
+             'runtimeWorkspaceRoots': [os.environ.get('FAKE_ROOT', os.getcwd())]}})
     elif method == 'turn/start':
-        assert set(params) == {'threadId', 'input', 'sandboxPolicy', 'approvalPolicy'}
-        assert params['approvalPolicy'] == 'on-request'
-        assert params['sandboxPolicy'] == {'type': 'workspaceWrite', 'writableRoots': [],
-            'networkAccess': False, 'excludeSlashTmp': True, 'excludeTmpdirEnvVar': True}
+        assert set(params) == {'threadId', 'input'}
         text = params['input'][0]['text']
         emit({'id': request['id'], 'result': {'turn': {'id': 'turn-1'}}})
         if text == 'hang':
@@ -200,12 +205,13 @@ class HostTests(unittest.TestCase):
         self.run_prompt('fail')
         self.assertEqual(self.result()['status'], 'failed')
 
-    def test_unexpected_effective_sandbox_stops_before_turn(self):
-        other = self.new_host({**self.env, 'FAKE_SANDBOX': 'readOnly'})
-        self.assertEqual(self.run_prompt(host=other)['type'], 'started')
-        result = probe.read_message(other, 5)
-        self.assertEqual(result['status'], 'failed')
-        self.assertIn('有効な権限設定', result['error'])
+    def test_unexpected_effective_permissions_stop_before_turn(self):
+        for override in ({'FAKE_PROFILE': 'other'}, {'FAKE_ROOT': '/tmp/other'}):
+            other = self.new_host({**self.env, **override})
+            self.assertEqual(self.run_prompt(host=other)['type'], 'started')
+            result = probe.read_message(other, 5)
+            self.assertEqual(result['status'], 'failed')
+            self.assertIn('有効な権限設定', result['error'])
 
     def test_approval_never_automatically_allowed(self):
         self.run_prompt('approval')
