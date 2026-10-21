@@ -195,3 +195,9 @@ Host自動試験12件、画面ロジック試験、JavaScript構文チェック�
 2026-10-21、Hostの`run`経路をCLI起動引数で定義した`focodex-project` permission profileへ切り替えた。`initialize.capabilities.experimentalApi=true`を送り、`thread/start.permissions`でprofileを選択する。従来の`thread/start.sandbox`と`turn/start.sandboxPolicy`は送らない。`activePermissionProfile.id`、`runtimeWorkspaceRoots`、`approvalPolicy`が期待値と異なる場合は`turn/start`前に終了する。Codex実行ファイルの実体パスは読み取り例外に含める。
 
 模擬Host試験21件と画面ロジック試験が成功。実Codex CLI 0.163.0と`gpt-6-luna`によるHost一往復で「Focodex接続成功」を受信し、`activePermissionProfile.id=focodex-project`、作業ルートが選択プロジェクトのみ、`approvalPolicy=on-request`、専用プロセス群の消滅を確認した。この一往復はツールを使わないため、ファイル境界そのものの検証結果は前節の実験による。
+
+## Firefox Native Hostのbwrap起動失敗
+
+2026-10-21、Firefox経由の送信では`thread/start`時に`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`で停止した。Codexターンとコマンドは開始していない。端末のHost試験は`vscode (unconfined)` AppArmorプロファイルで成功したが、Firefox SnapのNative Messagingポータルが起動したHostは`unconfined`だった。`aa-exec -p unconfined`で同じ`bwrap`失敗を再現した。Ubuntu 24.04の`kernel.apparmor_restrict_unprivileged_userns=1`、`/usr/bin/bwrap`は存在するが`/etc/apparmor.d/bwrap-userns-restrict`は未導入。したがって、Firefoxと端末のAppArmor状態の差が直接の原因と判断した。
+
+OpenAI公式の[Sandbox](https://learn.chatgpt.com/docs/sandboxing)はUbuntu 24.04向けに`apparmor-profiles`と`apparmor-utils`を入れ、配布される`bwrap-userns-restrict`を`/etc/apparmor.d/`へ配置・読み込みする方法を示している。管理者権限が必要で、このセッションでは`sudo -n`がパスワードを要求したため未適用。ホスト全体のuserns制限を無効化する変更や、Codexの隔離を外す変更は行っていない。Native HostはこのエラーをLinux隔離の起動失敗として表示し、実行を終了する。

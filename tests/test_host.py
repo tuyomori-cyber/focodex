@@ -113,6 +113,9 @@ for line in sys.stdin:
             sys.exit(2)
         elif text == 'rpc-error':
             emit({'id': 55, 'error': {'code': 1, 'message': 'test failure'}})
+        elif text == 'bwrap-error':
+            emit({'id': 55, 'error': {'code': -32603,
+                'message': 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted'}})
         else:
             for index, message in enumerate(['調査結果です。', 'Focodex接続成功']):
                 emit({'method': 'item/completed', 'params': {'threadId': 'thread-1',
@@ -332,6 +335,12 @@ class HostTests(unittest.TestCase):
         for text in ['crash', 'rpc-error']:
             self.run_prompt(text)
             self.assertEqual(self.result()['status'], 'failed')
+
+    def test_bwrap_failure_reports_sandbox_problem(self):
+        self.run_prompt('bwrap-error')
+        result = self.result()
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('Linux隔離を開始できません', result['error'])
 
     def test_unregistered_project_rejected(self):
         probe.write_message(self.host, {'type': 'run', 'id': 'x', 'projectId': '../other', 'text': 'hello'})

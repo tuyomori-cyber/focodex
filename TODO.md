@@ -20,6 +20,7 @@
 
 - [x] CLI 0.163.0とapp-serverでCodex標準のpermission profileを一時設定して検証。プロジェクト内の読み書き、外部ファイルとシンボリックリンクの読み取り拒否、外部実ファイルの不変、コマンドの外部通信禁止を確認。実モデルのターンでも外部読み取りが失敗した。
 - [x] Focodexの従来sandbox指定を検証済みpermission profileへ切り替え、実効profile・作業ルート・承認方針の照合と不一致時の実行停止を実装。Codex実行ファイルの実体パスだけ読み取り例外に追加。外部読み取りの承認UIはMVP対象外。実CLI 0.163.0のHost一往復でprofile選択を確認。
+- [ ] Firefox Native Hostからの実行でUbuntuのAppArmorが`bwrap`のループバック設定を拒否。限定的な`bwrap-userns-restrict`プロファイルを管理者が導入後、Firefox経由の再試験が必要。Hostは失敗時に隔離問題を表示して終了する。
 - [x] `.git`はprofile下で読み取り可能・書き込み不可を確認。Git変更操作はCodexから分離し、Focodexの専用Native Host処理で扱う方針。Git worktreeでは管理情報が外部にあり、Codexからの`git status`も失敗した。
 - [x] Python子プロセス、シェル、make、プロジェクトルートのシンボリックリンク、Git worktreeで外部読み取り・通信の境界を検証。外部実ファイルは不変。
 - [ ] 開発ツールの不足は利用時に個別評価する。この環境の`rg`はホーム配下にあり、現在のprofileでは使えない。現段階では例外を追加しない。

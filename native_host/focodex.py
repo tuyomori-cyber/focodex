@@ -392,7 +392,11 @@ class Host:
             self.request_interaction(value)
             return
         if 'error' in value and 'id' in value:
-            self.finish('failed', json.dumps(value['error'], ensure_ascii=False)[:4000])
+            error = json.dumps(value['error'], ensure_ascii=False)[:4000]
+            if 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted' in error:
+                error = ('CodexのLinux隔離を開始できませんでした。bwrapのループバック設定が'
+                         'AppArmor等で拒否されています。権限を緩めず、端末のbwrap設定を確認してください。')
+            self.finish('failed', error)
             return
         if value.get('id') == 1:
             self.agent_version = value['result'].get('userAgent')
