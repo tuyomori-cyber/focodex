@@ -6,7 +6,7 @@ FirefoxからNative Messaging経由でCodexへ指示を1件送り、応答全文
 ## 前提
 
 - Linuxの通常インストール版Firefox、Python 3（標準ライブラリのみ）、Codex CLI。
-- 確認したCLI版：初回`0.145.0`、モデル選択の追加検証時`0.163.0`。異なる版ではapp-serverプロトコルの再確認が必要。
+- 確認したCLI版：初回`0.145.0`、現在のpermission profile検証時`0.163.0`。異なる版ではapp-serverプロトコルの再確認が必要。
 - Firefoxを起動するユーザーでCodexの認証を済ませ、Firefoxで選択するモデルをその認証で利用できること。
 - Flatpak・Snap版FirefoxのHost配置／実行制約はこの検証の対象外。
 
@@ -60,7 +60,7 @@ Firefoxを再起動すると一時拡張は再読み込みが必要。拡張コ�
 - `initialize` → `initialized` → `thread/start` → `turn/start` → `item/completed`／`turn/completed`。
 - 指示ごとに一時スレッドを作成し、完了時にapp-serverを終了する。会話の継続・履歴保存はまだ実装しない。
 - 登録済みプロジェクトのIDからHost側で作業ディレクトリを決める。拡張から任意のパス・シェルコマンドは受け付けない。
-- モデル候補は`model/list`からページをたどって取得する。明示選択したモデルだけを`thread/start`に指定し、実行時には`workspaceWrite`・ネットワーク禁止・`on-request`を指定し、Codexの設定ファイルには書き込まない。外部読み取りの隔離は未実装。次の課題はCodex標準のpermission profileで「プロジェクト内は読み書き可、外部ユーザーファイルは原則読み取り不可」を実現できるか検証すること。
+- モデル候補は`model/list`からページをたどって取得する。明示選択したモデルだけを`thread/start`に指定し、実行時には`workspaceWrite`・ネットワーク禁止・`on-request`を指定し、Codexの設定ファイルには書き込まない。CLI 0.163.0の一時permission profileではプロジェクト内の読み書きと外部ファイルの読み取り遮断を確認済み。現行Hostへの適用は未実装で、通常実行の外部読み取り境界はまだ未達。
 - 完了・失敗・中断を区別する。一般的な承認要求は拒否し、追加質問はユーザーの明示操作で応答し、他の未対応要求は自動許可せず`unsupported_request`で終了する。
 - 同じ設定ファイルを使うHost同士は実行ロックで排他する。
 - 接続断・通常のHost終了・180秒の時間切れで、専用プロセス群へTERMを送り、1秒後も残る場合はKILLする。既存のファイル変更は戻さない。

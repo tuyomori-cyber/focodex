@@ -154,3 +154,22 @@ Host自動試験12件、画面ロジック試験、JavaScript構文チェック�
 ## 次の権限検証方針
 
 ユーザー方針を「プロジェクトの中では自由に開発できる。それ以外には原則触れない」に整理。外部読み取りの承認UIはMVPで実装しない。OpenAI公式のベータ版permission profileには、`":root" = "deny"`、`":minimal" = "read"`、workspace rootの書き込みを組み合わせる例がある。従来のsandbox設定とは併用できないため、まず使用中のCLI 0.156.1とapp-serverで動作を検証する。成功を確認するまで現行の外部読み取り境界は未達のままとする。参照：https://learn.chatgpt.com/docs/permissions
+
+## Codex CLI 0.163.0 permission profileの実動作
+
+2026-10-21、Focodexが参照する`/home/tuyomori/.local/bin/codex`が`0.163.0`であることを確認。既存のCodex設定とFocodex Hostは変更せず、app-server起動時の一時`-c`指定で検証した。`initialize.capabilities.experimentalApi=true`、`permissionProfile/list`で一時profileが`allowed: true`、`thread/start.permissions`で選択後の`activePermissionProfile.id`が一致することを確認した。
+
+一時profileは`":root"="deny"`、`":minimal"="read"`、`":workspace_roots"."="write"`、`":tmpdir"="deny"`、`":slash_tmp"="deny"`、`network.enabled=false`を基本とした。Codex CLI本体がホーム配下に置かれているため、その実体パスを読み取り例外に追加した。追加しない場合、bubblewrap内でCodex本体を実行できず、全コマンドが開始前に失敗した。
+
+| 試験 | 結果 |
+| --- | --- |
+| 一時プロジェクト内の読み取り・書き込み | 成功 |
+| プロジェクト外の既知の一時ファイル読み取り | `FileNotFoundError`で失敗 |
+| プロジェクト内のシンボリックリンク経由で外部ファイルを読み取り | `FileNotFoundError`で失敗 |
+| プロジェクト外の既知の一時ファイルへ書き込み | コマンドは終了コード0だが、ホスト側の実ファイルは不変。隔離内の一時的な書き込みとみられるため、結果表示の設計には注意が必要 |
+| 外部へのTCP接続 | `PermissionError: Operation not permitted` |
+| 一時Gitリポジトリ内の`git status --short` | 成功 |
+| 同じリポジトリ内の`git add` | `.git/index.lock`が読み取り専用で失敗 |
+| `gpt-6-luna`の実ターンから外部ファイルを読むコマンド | コマンド失敗。モデルも`FileNotFoundError`と報告 |
+
+一時プロジェクトと外部ファイルは試験後に削除した。Focodex Hostは引き続き従来の`workspaceWrite`を指定しており、通常のFirefox実行にこの隔離はまだ適用されていない。次はHostのprofile選択・有効設定照合とGit操作の扱いを実装する。参照：[OpenAI公式 permission profile](https://learn.chatgpt.com/docs/permissions)、[App Server](https://learn.chatgpt.com/docs/app-server)。
