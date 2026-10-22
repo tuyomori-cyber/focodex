@@ -842,6 +842,10 @@ class Host:
                     review_token = secrets.token_urlsafe(24)
                     self.git_reviews[key] = (review_token, review, time.monotonic())
                     result = {k: review[k] for k in ('tree', 'ref', 'parent', 'message', 'identity', 'diff')}
+                    snapshot = git_snapshot(project)
+                    result['stagedFiles'] = [
+                        {key: row[key] for key in ('path', 'status', 'originalPath')}
+                        for row in snapshot['files'] if row['status'] != '??' and row['status'][0] != ' ']
                     result['reviewToken'] = review_token
                 else:
                     stored = self.git_reviews.pop(key, None)

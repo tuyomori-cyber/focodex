@@ -15,9 +15,9 @@
     const section = $("received-draft"), list = $("received-text");
     for (const [target, suffix] of targets) {
       $("undo-" + suffix).hidden = undoTexts[target] === null;
-      $("undo-" + suffix).disabled = !ready || active || undoTexts[target] === null;
+      $("undo-" + suffix).disabled = active || undoTexts[target] === null;
       $("clear-" + suffix).hidden = !$(target).value;
-      $("clear-" + suffix).disabled = !ready || active || !$(target).value;
+      $("clear-" + suffix).disabled = active || !$(target).value;
     }
     section.hidden = buffer.length === 0; list.textContent = "";
     for (const item of [...buffer].reverse()) {
@@ -50,12 +50,12 @@
   $("draft-reconnect").addEventListener("click", connect);
   for (const [target, suffix] of targets) {
     $("undo-" + suffix).addEventListener("click", () => {
-      if (undoTexts[target] === null || active || !ready) return;
+      if (undoTexts[target] === null || active) return;
       $(target).value = undoTexts[target]; undoTexts[target] = null;
       $(target).dispatchEvent(new Event("input", {bubbles: true})); render();
     });
     $("clear-" + suffix).addEventListener("click", () => {
-      if (!$(target).value || active || !ready) return;
+      if (!$(target).value || active) return;
       undoTexts[target] = $(target).value; $(target).value = "";
       $(target).dispatchEvent(new Event("input", {bubbles: true})); render();
     });

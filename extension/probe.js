@@ -25,32 +25,65 @@ function clearGitReview() {
   gitReviewToken = null;
   $("commit-review").hidden = true;
 }
+function gitProjectName() {
+  const id = $("git-project").value;
+  const projects = $("workspace").value === "__standalone__" ? standaloneProjects : currentWorkspace()?.projects || [];
+  return projects.find(project => project.id === id)?.name || id;
+}
+function branchName(ref) { return typeof ref === "string" ? ref.replace(/^refs\/heads\//, "") : "不明"; }
+function showCommitReview(message) {
+  gitReviewToken = message.reviewToken;
+  $("commit-review").hidden = false;
+  $("commit-target").textContent = `リポジトリ：${gitProjectName()}\nブランチ：${branchName(message.ref)}`;
+  const files = Array.isArray(message.stagedFiles) ? message.stagedFiles : [];
+  $("commit-summary").textContent = `コミット対象：${files.length}ファイル`;
+  $("commit-files").replaceChildren();
+  for (const file of files) {
+    const item = document.createElement("li");
+    item.textContent = `${file.path} — ${gitStatusLabel(file.status)}` +
+      (file.originalPath ? `（元: ${file.originalPath}）` : "");
+    $("commit-files").append(item);
+  }
+  $("commit-confirm-message").textContent = message.message;
+  $("commit-internal").textContent = `対象ID: ${$("git-project").value}\n参照: ${message.ref}\n作者: ${message.identity.name} <${message.identity.email}>\nTree: ${message.tree}`;
+  $("commit-diff").textContent = message.diff;
+  $("commit-details").open = false;
+}
 function resetGit() {
   gitSnapshotToken = null; gitCanModify = false; gitSelections.clear(); clearGitReview();
   $("git-message").textContent = ""; $("git-files").replaceChildren();
 }
 function currentWorkspace() { return workspaces.get($("workspace").value); }
 function currentProject() { return $("project").value; }
+function syncGitProjects() {
+  const workspace = currentWorkspace();
+  const standalone = $("workspace").value === "__standalone__";
+  const current = currentProject();
+  const projects = standalone
+    ? standaloneProjects.filter(project => project.id === current)
+    : workspace?.projects || [];
+  resetGit();
+  $("git-project").replaceChildren();
+  for (const project of projects) $("git-project").append(new Option(`${project.name} (${project.path})`, project.id));
+  if (projects.some(project => project.id === current)) $("git-project").value = current;
+}
 function showWorkspaceProjects() {
   const workspace = currentWorkspace();
   const standalone = $("workspace").value === "__standalone__";
-  resetGit();
-  $("git-project").replaceChildren();
-  const gitProjects = standalone ? standaloneProjects : workspace?.projects || [];
-  for (const project of gitProjects) $("git-project").append(new Option(`${project.name} (${project.path})`, project.id));
-  if (!standalone && workspace) $("git-project").value = workspace.defaultProjectId;
   $("workspace-choice").hidden = false;
   $("project").replaceChildren();
   $("git-message").textContent = "";
   $("git-files").replaceChildren();
   if (standalone) {
     for (const project of standaloneProjects) $("project").append(new Option(`${project.name} (${project.path})`, project.id));
+    syncGitProjects();
     $("workspace-members").textContent = "許可対象: 開始プロジェクトとして選んだリポジトリ1件";
     editingWorkspaceId = null;
     $("editing-workspace").textContent = "単独リポジトリは管理対象のワークスペースではありません。";
     return;
   }
   if (!workspace) {
+    syncGitProjects();
     $("workspace-members").textContent = "";
     return;
   }
@@ -60,6 +93,7 @@ function showWorkspaceProjects() {
   if (workspace.projects.some(project => project.id === workspace.defaultProjectId)) {
     $("project").value = workspace.defaultProjectId;
   }
+  syncGitProjects();
   $("workspace-members").textContent = `許可対象: ${workspace.projects.map(project => `${project.name}（${project.path}）`).join("、")}`;
   showManagerWorkspace();
 }
@@ -258,10 +292,11 @@ function showGitFiles(files) {
     }
     const label = document.createElement("label"), input = document.createElement("input");
     input.type = "checkbox"; input.checked = false;
-    input.stageable = file.status === "??" || file.status[1] !== " ";
+    const alreadyStaged = file.status !== "??" && file.status[0] !== " ";
+    input.stageable = !alreadyStaged && (file.status === "??" || file.status[1] !== " ");
     input.disabled = !gitCanModify || !input.stageable;
     input.addEventListener("change", controls);
-    label.append(input, " このファイルをステージ");
+    label.append(input, alreadyStaged ? " ステージ済み（解除は未対応）" : " このファイルをステージ");
     details.append(label);
     gitSelections.set(file.path, input);
     $("git-files").append(details);
@@ -323,6 +358,12 @@ $("git-commit").addEventListener("click", () => {
   clearGitReview();
   gitRequest("git_commit", {reviewToken});
 });
+$("git-cancel-review").addEventListener("click", () => {
+  if (!gitReviewToken || busy) return;
+  clearGitReview();
+  $("git-message").textContent = "最終確認を取り消しました。ステージやメッセージを編集できます。";
+  controls();
+});
 $("commit-message").addEventListener("input", () => { clearGitReview(); controls(); });
 function managerRequest(type, payload = {}) {
   if (!port || busy || managerRequestId) return;
@@ -337,6 +378,7 @@ function managerRequest(type, payload = {}) {
   controls();
 }
 $("project").addEventListener("change", () => {
+  syncGitProjects();
   fetchModels();
 });
 $("workspace").addEventListener("change", () => {
@@ -413,10 +455,9 @@ function controls() {
   $("git-commit").disabled = gitBusy || !gitReviewToken;
   $("commit-message").disabled = busy;
   for (const input of gitSelections.values()) input.disabled = busy || !gitCanModify || !input.stageable;
-  $("run").disabled = window.focodexDraftReady === false || $("project").disabled || $("model").disabled || !$("model").value || !$("prompt").value.trim();
+  $("run").disabled = $("project").disabled || $("model").disabled || !$("model").value || !$("prompt").value.trim();
   $("stop").disabled = !port || !busy || pendingKind !== "run" || stopping;
   $("prompt").disabled = busy;
-  $("prompt").readOnly = window.focodexDraftReady === false;
   window.focodexDraftRefresh?.(busy);
   const cannotReply = !interaction || stopping || Boolean(responseRequestId);
   $("approve").disabled = cannotReply || !interaction?.approvable;
@@ -496,12 +537,8 @@ $("connect").addEventListener("click", () => {
       busy = false; pendingId = null; pendingKind = null;
       $("diff-panel").open = true;
       if (message.type === "git_review") {
-        gitReviewToken = message.reviewToken;
-        $("commit-review").hidden = false;
-        $("commit-target").textContent = `対象: ${$("git-project").value} / ${message.ref} / 作者: ${message.identity.name} <${message.identity.email}>`;
-        $("commit-confirm-message").textContent = message.message;
-        $("commit-diff").textContent = message.diff;
-        $("git-message").textContent = "ステージ済み全体とメッセージを確認してCommitしてください。";
+        showCommitReview(message);
+        $("git-message").textContent = "対象ファイルとメッセージを確認してCommitしてください。詳細から差分全文を確認できます。";
       } else {
         clearGitReview();
         gitCanModify = message.canModify === true;
@@ -626,7 +663,7 @@ $("stop").addEventListener("click", () => {
 $("form").addEventListener("submit", event => {
   clearGitReview();
   event.preventDefault();
-  if (window.focodexDraftReady === false || busy || !port || !$("project").value || !$("model").value || !$("prompt").value.trim()) return;
+  if (busy || !port || !$("project").value || !$("model").value || !$("prompt").value.trim()) return;
   pendingId = crypto.randomUUID();
   pendingKind = "run";
   resetGit();

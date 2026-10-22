@@ -15,7 +15,7 @@ const ids = ['draft-connection-status', 'received-draft', 'received-text', 'prom
 const elements = Object.fromEntries(ids.map(id => [id, new Element()]));
 elements.prompt.value = '元の指示'; elements['commit-message'].value = '元のCommit文';
 const calls = [];
-const port = {onMessage: {addListener(fn) { this.emit = fn; }}, onDisconnect: {addListener() {}},
+const port = {onMessage: {addListener(fn) { this.emit = fn; }}, onDisconnect: {addListener(fn) { this.emit = fn; }},
   postMessage(message) {
     calls.push(message);
     this.onMessage.emit({rpc: message.rpc, buffer: [{requestId: 'id', text: '音声の文章'}]});
@@ -47,5 +47,13 @@ assert.equal(actions()[1].disabled, true);
 actions()[1].fire('click');
 elements['clear-commit'].fire('click');
 assert.equal(elements['commit-message'].value, '元のCommit文');
+window.focodexDraftRefresh(false);
+port.onDisconnect.emit();
+assert.equal(actions()[0].disabled, true, '切断中は受信文を指示文へ反映できない');
+assert.equal(actions()[1].disabled, true, '切断中は受信文をCommit欄へ反映できない');
+assert.equal(actions()[2].disabled, true, '切断中は受信文を削除できない');
+assert.equal(elements['clear-commit'].disabled, false, '切断中もローカルのCommit欄はクリアできる');
+elements['clear-commit'].fire('click');
+assert.equal(elements['commit-message'].value, '');
 assert.deepEqual(calls.map(call => call.type), ['get'], '反映・Undo・クリアはHostやGitを呼ばない');
 console.log('Commit欄への反映・独立Undo・クリア・実行中抑止: OK');

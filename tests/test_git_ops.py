@@ -119,6 +119,7 @@ class GitTests(unittest.TestCase):
         self.assertIn('+pre-staged', review['diff'])
         self.assertIn('+selected', review['diff'])
         self.assertNotIn('unselected.txt', review['diff'])
+        self.assertEqual({item['path'] for item in review['stagedFiles']}, {'a.txt', 'b.txt'})
         result = self.request('git_commit', reviewToken=review['reviewToken'])
         self.assertEqual(result['type'], 'git_commit', result)
         self.assertEqual(self.git('rev-parse', 'HEAD^{tree}').strip(), review['tree'])

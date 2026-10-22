@@ -10,12 +10,13 @@ class Element {
   append(...options) { this.options.push(...options); if (this.options.length === options.length) this.value = options[0]?.value; }
   setAttribute() {}
 }
-const elements = Object.fromEntries(['connect', 'manage-workspaces', 'help', 'help-panel', 'workspace-manager', 'manager-workspace', 'editing-workspace', 'discovery-root', 'new-discovery-root', 'add-discovery-root', 'scan-repositories', 'manager-message', 'repository-results', 'workspace-name-field', 'workspace-name', 'manager-default-project', 'save-workspace', 'delete-workspace', 'workspace-choice', 'workspace', 'workspace-members', 'project', 'model', 'refresh-models', 'prompt', 'form', 'run', 'stop', 'status', 'diagnostics', 'interaction', 'interaction-title', 'interaction-details', 'approval-view', 'operation-label', 'operation-text', 'operation-cwd', 'approval-reason', 'approval-scope', 'approval-warning', 'questions', 'approve', 'decline', 'answer-question', 'answer', 'info', 'response-panel', 'diff-panel', 'git-refresh', 'git-message', 'git-files', 'git-project', 'git-stage', 'commit-message', 'git-review', 'git-commit', 'commit-review', 'commit-target', 'commit-confirm-message', 'commit-diff'].map(id => [id, new Element()]));
+const elements = Object.fromEntries(['connect', 'manage-workspaces', 'help', 'help-panel', 'workspace-manager', 'manager-workspace', 'editing-workspace', 'discovery-root', 'new-discovery-root', 'add-discovery-root', 'scan-repositories', 'manager-message', 'repository-results', 'workspace-name-field', 'workspace-name', 'manager-default-project', 'save-workspace', 'delete-workspace', 'workspace-choice', 'workspace', 'workspace-members', 'project', 'model', 'refresh-models', 'prompt', 'form', 'run', 'stop', 'status', 'diagnostics', 'interaction', 'interaction-title', 'interaction-details', 'approval-view', 'operation-label', 'operation-text', 'operation-cwd', 'approval-reason', 'approval-scope', 'approval-warning', 'questions', 'approve', 'decline', 'answer-question', 'answer', 'info', 'response-panel', 'diff-panel', 'git-refresh', 'git-message', 'git-files', 'git-project', 'git-stage', 'commit-message', 'git-review', 'git-commit', 'git-cancel-review', 'commit-review', 'commit-target', 'commit-summary', 'commit-files', 'commit-confirm-message', 'commit-details', 'commit-internal', 'commit-diff'].map(id => [id, new Element()]));
 elements.prompt.value = '接続確認';
 elements['workspace-manager'].hidden = true;
 elements['help-panel'].hidden = true;
 const sent = [];
 const storage = new Map();
+const pageWindow = {};
 const port = {
   postMessage: message => sent.push(message),
   onMessage: {addListener(callback) { this.emit = callback; }},
@@ -23,7 +24,7 @@ const port = {
 };
 let sequence = 0;
 vm.runInNewContext(fs.readFileSync(new URL('../extension/probe.js', import.meta.url), 'utf8'), {
-  window: {},
+  window: pageWindow,
   document: {getElementById: id => elements[id], createElement: () => new Element()},
   Option: function (label, value) { this.textContent = label; this.value = value; },
   browser: {runtime: {connectNative: () => port}},
@@ -36,6 +37,8 @@ const initialProjectsId = sent.at(-1).id;
 reply({type: 'projects', id: initialProjectsId, discoveryRoots: [], discoveryRootCandidates: ['/repos'], standaloneProjects: [{id: 'repo_discovered', name: 'Discovered', path: '/repos/discovered'}], workspaces: [{id: 'workspace', name: 'Workspace', defaultProjectId: 'project', projects: [{id: 'project', name: 'Project', path: '/project'}, {id: 'other', name: 'Other', path: '/other'}]}]});
 assert.equal(sent.at(-1).type, 'projects');
 assert.match(elements['workspace-members'].textContent, /Project.*Other/);
+assert.deepEqual(elements['git-project'].options.map(option => option.value), ['project', 'other'], 'ワークスペース登録済みのリポジトリだけをGit候補にする');
+assert.equal(elements['git-project'].value, 'project', 'Git対象は開始プロジェクトから始める');
 assert.equal(elements['workspace-choice'].hidden, false, '単独リポジトリ選択のため常に表示する');
 assert.equal(elements['delete-workspace'].disabled, false, '単独ワークスペースも管理画面から削除できる');
 assert.equal(elements['add-discovery-root'].disabled, false, 'モデル一覧取得前にも検出ルートを追加できる');
@@ -56,6 +59,12 @@ assert.equal(elements['save-workspace'].disabled, false, '検出結果の描画�
 elements['refresh-models'].fire('click');
 assert.equal(sent.at(-1).type, 'models');
 assert.equal(sent.at(-1).workspaceId, 'workspace');
+reply({type: 'models', id: sent.at(-1).id, models: [{model: 'first', displayName: 'First'}, {model: 'second', displayName: 'Second'}]});
+elements.project.value = 'other'; elements.project.fire('change');
+assert.equal(elements['git-project'].value, 'other', '開始プロジェクトの変更にGit対象を追従させる');
+assert.deepEqual(elements['git-project'].options.map(option => option.value), ['project', 'other']);
+reply({type: 'models', id: sent.at(-1).id, models: [{model: 'first', displayName: 'First'}, {model: 'second', displayName: 'Second'}]});
+elements.project.value = 'project'; elements.project.fire('change');
 reply({type: 'models', id: sent.at(-1).id, models: [{model: 'first', displayName: 'First'}, {model: 'second', displayName: 'Second'}]});
 elements['git-refresh'].fire('click');
 assert.equal(sent.at(-1).type, 'git_snapshot');
@@ -82,14 +91,26 @@ assert.equal(sent.at(-1).snapshotToken, 'snapshot-1');
 assert.equal(elements.model.disabled, true);
 reply({type: 'git_stage', id: sent.at(-1).id, canModify: true, snapshotToken: 'staged', files: [
   {path: 'src/app.py', status: 'M ', stagedDiff: '+change', unstagedDiff: ''}]});
+const stagedLabel = elements['git-files'].options[0].options.at(-1);
+const stagedChoice = stagedLabel.options[0];
+assert.equal(stagedChoice.disabled, true);
+assert.equal(stagedLabel.options[1], ' ステージ済み（解除は未対応）');
 elements['git-review'].fire('click');
 assert.equal(sent.at(-1).message, '音声のCommitメッセージ');
 const reviewReply = () => reply({type: 'git_review', id: sent.at(-1).id, reviewToken: 'reviewed',
   ref: 'refs/heads/main', tree: 'fixed-tree', parent: 'old', identity: {name: 'Test', email: 'test@example.invalid'},
-  message: elements['commit-message'].value, diff: '+change'});
+  message: elements['commit-message'].value, stagedFiles: [{path: 'src/app.py', status: 'M ', originalPath: null}], diff: '+change'});
 reviewReply();
 assert.equal(elements['commit-review'].hidden, false);
-assert.match(elements['commit-target'].textContent, /refs\/heads\/main/);
+assert.match(elements['commit-target'].textContent, /リポジトリ：Project[\s\S]*ブランチ：main/);
+assert.equal(elements['commit-summary'].textContent, 'コミット対象：1ファイル');
+assert.match(elements['commit-files'].options[0].textContent, /src\/app\.py.*変更/);
+assert.match(elements['commit-internal'].textContent, /対象ID: project[\s\S]*refs\/heads\/main/);
+assert.equal(elements['commit-details'].open, false);
+elements['git-cancel-review'].fire('click');
+assert.equal(elements['commit-review'].hidden, true, '最終確認はCommitせず取り消せる');
+assert.match(elements['git-message'].textContent, /取り消しました/);
+elements['git-review'].fire('click'); reviewReply();
 elements['commit-message'].value = '変更したメッセージ'; elements['commit-message'].fire('input');
 assert.equal(elements['git-commit'].disabled, true, 'メッセージ変更で最終確認を失効する');
 const beforeInvalidCommit = sent.length;
@@ -115,6 +136,9 @@ assert.equal(elements.run.disabled, true, '送信前の明示選択が必要');
 elements.model.value = 'first';
 elements.model.fire('change');
 assert.equal(elements.run.disabled, false);
+pageWindow.focodexDraftReady = false;
+elements.model.fire('change');
+assert.equal(elements.run.disabled, false, '受信バッファ切断は送信可否に影響しない');
 elements.form.fire('submit');
 assert.equal(sent.at(-1).model, 'first');
 assert.equal(sent.at(-1).workspaceId, 'workspace');
@@ -246,10 +270,12 @@ assert.equal(sent.at(-1).itemId, 'question-item');
 reply({type: 'answered', id: runId, requestId: 'question-1'});
 reply({type: 'result', id: runId, status: 'completed'});
 reply({type: 'projects', id: initialProjectsId, selectedWorkspaceId: '__standalone__', discoveryRoots: [],
-  standaloneProjects: [{id: 'repo_discovered', name: 'Discovered', path: '/repos/discovered'}],
+  standaloneProjects: [{id: 'repo_discovered', name: 'Discovered', path: '/repos/discovered'},
+    {id: 'repo_other', name: 'Other discovery', path: '/repos/other'}],
   workspaces: [{id: 'workspace', name: 'Workspace', defaultProjectId: 'project',
     projects: [{id: 'project', name: 'Project', path: '/project'}, {id: 'other', name: 'Other', path: '/other'}]}]});
 assert.equal(elements['git-project'].value, 'repo_discovered', '単独リポジトリもGit対象として選択する');
+assert.deepEqual(elements['git-project'].options.map(option => option.value), ['repo_discovered'], '単独リポジトリでは実行設定の選択1件だけをGit候補にする');
 elements['git-refresh'].fire('click');
 assert.equal(sent.at(-1).type, 'git_snapshot');
 assert.equal(sent.at(-1).workspaceId, '__standalone__');

@@ -107,10 +107,18 @@
     <button id="clear-commit" type="button" hidden>クリア</button>
     <button id="git-review" type="button" disabled>ステージ済み全体を最終確認</button>
     <section id="commit-review" hidden>
-      <h3>この内容をCommitします</h3>
+      <h3>コミット最終確認</h3>
       <p id="commit-target"></p>
+      <p id="commit-summary"></p>
+      <ul id="commit-files"></ul>
+      <h4>メッセージ</h4>
       <pre id="commit-confirm-message"></pre>
-      <pre id="commit-diff"></pre>
+      <details id="commit-details">
+        <summary>詳細を表示</summary>
+        <pre id="commit-internal"></pre>
+        <pre id="commit-diff"></pre>
+      </details>
+      <button id="git-cancel-review" type="button">確認をやめる</button>
       <button id="git-commit" type="button" disabled>確認した内容をCommit</button>
     </section>
     </section>

@@ -43,4 +43,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 #git-files label { padding: .7rem; margin: 0; }
 #git-files input[type="checkbox"] { width: 1.3rem; height: 1.3rem; vertical-align: middle; }
 #commit-review { border: 2px solid currentColor; border-radius: .5rem; padding: .8rem; margin-top: 1rem; }
+#commit-files { margin: .4rem 0 1rem; padding-inline-start: 1.5rem; }
+#commit-files li { margin: .3rem 0; overflow-wrap: anywhere; }
+#commit-review h4 { margin: 1rem 0 .3rem; font-size: 1rem; }
 #commit-diff { max-height: 28rem; overflow: auto; }
