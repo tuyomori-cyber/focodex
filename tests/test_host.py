@@ -3,15 +3,21 @@ import json
 import os
 from pathlib import Path
 import signal
+import sys
 import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('probe', ROOT / 'scripts/probe_host.py')
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
+sys.path.insert(0, str(ROOT / 'native_host'))
+host_spec = importlib.util.spec_from_file_location('focodex_host', ROOT / 'native_host/focodex.py')
+host_module = importlib.util.module_from_spec(host_spec)
+host_spec.loader.exec_module(host_module)
 
 FAKE = '''#!/usr/bin/env python3
 import json, os, sys, time
@@ -154,7 +160,9 @@ class HostTests(unittest.TestCase):
         fake = root / 'codex'
         fake.write_text(FAKE)
         fake.chmod(0o700)
-        self.config = root / 'config.json'
+        settings_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(settings_temp.cleanup)
+        self.config = Path(settings_temp.name) / 'config.json'
         self.config.write_text(json.dumps({'codex': str(fake), 'projects': {
             'test': {'name': 'テスト', 'path': str(root)}}}))
         self.pid = root / 'pid'
@@ -188,6 +196,7 @@ class HostTests(unittest.TestCase):
             self.assertEqual(result['text'], '調査結果です。\n\nFocodex接続成功')
             self.assertEqual(result['settings']['model'], 'inherited')
             self.assertEqual(result['threadId'], 'thread-1')
+            self.assertFalse(self.config.with_suffix('.execution.json').exists())
 
     def test_model_listing_pagination_and_explicit_selection(self):
         probe.write_message(self.host, {'type': 'models', 'id': 'm', 'projectId': 'test'})
@@ -492,6 +501,88 @@ class HostTests(unittest.TestCase):
         with self.assertRaises(ProcessLookupError):
             os.kill(child, 0)
 
+    def test_sigkill_leaves_durable_block_even_after_child_exits(self):
+        self.assertEqual(self.run_prompt('hang')['type'], 'started')
+        deadline = time.monotonic() + 3
+        while not self.pid.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        child = int(self.pid.read_text())
+        self.addCleanup(self.kill_group, child)
+        marker = self.config.with_suffix('.execution.json')
+        self.assertTrue(marker.exists())
+        self.host.kill()
+        self.host.wait(timeout=5)
+        # Kernel flock is now free; persistent execution state must still block.
+        second = self.new_host()
+        for message in (
+                {'type': 'run', 'text': 'hello'}, {'type': 'models'},
+                {'type': 'git_snapshot'},
+                {'type': 'discovery_root_add', 'path': self.temp.name}):
+            probe.write_message(second, {**message, 'id': 'blocked', 'projectId': 'test'})
+            reply = probe.read_message(second, 5)
+            self.assertEqual(reply['type'], 'error')
+            self.assertIn('終了が未確認', reply['error'])
+        self.kill_group(child)
+        self.assertEqual(self.run_prompt(host=second)['type'], 'error')
+        self.assertTrue(marker.exists())
+
+    @staticmethod
+    def kill_group(pid):
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def test_uncertain_cleanup_releases_lock_but_keeps_block(self):
+        with mock.patch.object(host_module, 'CONFIG', self.config):
+            token = 'owned-test-execution'
+            host_module.atomic_json(host_module.execution_path(), {
+                'version': 1, 'token': token, 'bootId': host_module.boot_id()})
+            host = host_module.Host.__new__(host_module.Host)
+            host.process = mock.Mock(pid=123456789)
+            host.process.wait.return_value = 0
+            host.selector = mock.Mock()
+            host.lock = self.config.with_suffix('.lock').open('a')
+            host_module.fcntl.flock(host.lock, host_module.fcntl.LOCK_EX)
+            host.execution_token = token
+            host.cleanup_uncertain = False
+            host.rpc_buffer = bytearray()
+            with mock.patch.object(host_module.os, 'killpg', side_effect=PermissionError):
+                with self.assertRaises(PermissionError):
+                    host.cleanup()
+            self.assertIsNone(host.lock)
+            self.assertTrue(host_module.execution_path().exists())
+            # A later cleanup still cannot prove the process group disappeared.
+            with mock.patch.object(host_module.os, 'killpg', side_effect=[ProcessLookupError, None]):
+                result = host.cleanup()
+            self.assertFalse(result['processGroupGone'])
+            self.assertTrue(host.cleanup_uncertain)
+            self.assertIsNone(host.lock)
+            host.cleanup()  # Repeated cleanup must not erase the block.
+            with self.assertRaisesRegex(ValueError, '終了が未確認'):
+                host.locked_config()
+            self.assertTrue(host_module.execution_path().exists())
+
+    def test_execution_record_recovery_requires_different_boot(self):
+        with mock.patch.object(host_module, 'CONFIG', self.config):
+            path = host_module.execution_path()
+            guard = host_module.Host.__new__(host_module.Host)
+            for value in ('{', '{}', '{"version": 1, "token": "x", "bootId": "bad"}'):
+                path.write_text(value)
+                with self.assertRaises(ValueError):
+                    with guard.locked_config():
+                        pass
+                self.assertTrue(path.exists())
+            host_module.atomic_json(path, {'version': 1, 'token': 'x',
+                                          'bootId': host_module.boot_id().upper()})
+            with self.assertRaisesRegex(ValueError, '終了が未確認'):
+                with guard.locked_config():
+                    pass
+            with mock.patch.object(host_module, 'boot_id', return_value='00000000-0000-0000-0000-000000000001'):
+                with guard.locked_config():
+                    pass
+            self.assertFalse(path.exists())
+
     def test_stop_waits_for_confirmed_exit(self):
         self.assertEqual(self.run_prompt('hang')['type'], 'started')
         deadline = time.monotonic() + 3
@@ -535,6 +626,7 @@ class HostTests(unittest.TestCase):
         manifest = json.loads((target / '.mozilla/native-messaging-hosts/focodex.json').read_text())
         self.assertTrue(os.access(manifest['path'], os.X_OK))
         self.assertEqual(manifest['allowed_extensions'], ['focodex@foxbook.example'])
+        self.assertTrue((target / '.local/lib/focodex/git_ops.py').is_file())
 
 
 if __name__ == '__main__':

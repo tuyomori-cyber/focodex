@@ -20,6 +20,9 @@ def install(home, codex):
     host = target / 'focodex.py'
     shutil.copyfile(ROOT / 'native_host/focodex.py', host)
     host.chmod(0o700)
+    git_module = target / 'git_ops.py'
+    shutil.copyfile(ROOT / 'native_host/git_ops.py', git_module)
+    git_module.chmod(0o600)
     launcher = target / 'launch'
     # JSON quoting is not shell escaping. Quote executable paths with shlex.
     import shlex

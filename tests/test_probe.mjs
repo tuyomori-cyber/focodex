@@ -10,7 +10,7 @@ class Element {
   append(...options) { this.options.push(...options); if (this.options.length === options.length) this.value = options[0]?.value; }
   setAttribute() {}
 }
-const elements = Object.fromEntries(['connect', 'manage-workspaces', 'help', 'help-panel', 'workspace-manager', 'manager-workspace', 'editing-workspace', 'discovery-root', 'new-discovery-root', 'add-discovery-root', 'scan-repositories', 'manager-message', 'repository-results', 'workspace-name-field', 'workspace-name', 'manager-default-project', 'save-workspace', 'delete-workspace', 'workspace-choice', 'workspace', 'workspace-members', 'project', 'model', 'refresh-models', 'prompt', 'form', 'run', 'stop', 'status', 'diagnostics', 'interaction', 'interaction-title', 'interaction-details', 'approval-view', 'operation-label', 'operation-text', 'operation-cwd', 'approval-reason', 'approval-scope', 'approval-warning', 'questions', 'approve', 'decline', 'answer-question', 'answer', 'info', 'response-panel', 'diff-panel', 'git-refresh', 'git-message', 'git-files'].map(id => [id, new Element()]));
+const elements = Object.fromEntries(['connect', 'manage-workspaces', 'help', 'help-panel', 'workspace-manager', 'manager-workspace', 'editing-workspace', 'discovery-root', 'new-discovery-root', 'add-discovery-root', 'scan-repositories', 'manager-message', 'repository-results', 'workspace-name-field', 'workspace-name', 'manager-default-project', 'save-workspace', 'delete-workspace', 'workspace-choice', 'workspace', 'workspace-members', 'project', 'model', 'refresh-models', 'prompt', 'form', 'run', 'stop', 'status', 'diagnostics', 'interaction', 'interaction-title', 'interaction-details', 'approval-view', 'operation-label', 'operation-text', 'operation-cwd', 'approval-reason', 'approval-scope', 'approval-warning', 'questions', 'approve', 'decline', 'answer-question', 'answer', 'info', 'response-panel', 'diff-panel', 'git-refresh', 'git-message', 'git-files', 'git-project', 'git-stage', 'commit-message', 'git-review', 'git-commit', 'commit-review', 'commit-target', 'commit-confirm-message', 'commit-diff'].map(id => [id, new Element()]));
 elements.prompt.value = '接続確認';
 elements['workspace-manager'].hidden = true;
 elements['help-panel'].hidden = true;
@@ -23,6 +23,7 @@ const port = {
 };
 let sequence = 0;
 vm.runInNewContext(fs.readFileSync(new URL('../extension/probe.js', import.meta.url), 'utf8'), {
+  window: {},
   document: {getElementById: id => elements[id], createElement: () => new Element()},
   Option: function (label, value) { this.textContent = label; this.value = value; },
   browser: {runtime: {connectNative: () => port}},
@@ -58,7 +59,7 @@ reply({type: 'models', id: sent.at(-1).id, models: [{model: 'first', displayName
 elements['git-refresh'].fire('click');
 assert.equal(sent.at(-1).type, 'git_snapshot');
 assert.equal(elements['git-refresh'].disabled, true);
-reply({type: 'git_snapshot', id: sent.at(-1).id, files: [
+reply({type: 'git_snapshot', id: sent.at(-1).id, canModify: true, snapshotToken: 'snapshot-1', files: [
   {path: 'src/app.py', status: ' M', unstagedDiff: '+change', stagedDiff: ''},
   {path: 'test.txt', status: '??', unstagedDiff: '+test', stagedDiff: ''}]});
 assert.equal(elements['git-files'].options.length, 2);
@@ -67,6 +68,48 @@ assert.equal(elements['git-files'].options[0].open, false, '差分は初期状�
 assert.match(elements['git-files'].options[0].options[0].textContent, /src\/app.py.*変更/);
 assert.equal(elements['git-files'].options[0].options[2].textContent, '+change');
 assert.match(elements['git-files'].options[1].options[0].textContent, /test.txt.*未追跡/);
+// Git operations use an independently selected target and never send Codex instructions.
+const fileChoice = elements['git-files'].options[0].options.at(-1).options[0];
+fileChoice.checked = true; fileChoice.fire('change');
+elements['commit-message'].value = '音声のCommitメッセージ';
+elements['commit-message'].fire('input');
+assert.equal(elements['git-stage'].disabled, false);
+elements['git-stage'].fire('click');
+assert.equal(sent.at(-1).type, 'git_stage');
+assert.deepEqual(Array.from(sent.at(-1).files), ['src/app.py']);
+assert.equal(sent.at(-1).snapshotToken, 'snapshot-1');
+assert.equal(elements.model.disabled, true);
+reply({type: 'git_stage', id: sent.at(-1).id, canModify: true, snapshotToken: 'staged', files: [
+  {path: 'src/app.py', status: 'M ', stagedDiff: '+change', unstagedDiff: ''}]});
+elements['git-review'].fire('click');
+assert.equal(sent.at(-1).message, '音声のCommitメッセージ');
+const reviewReply = () => reply({type: 'git_review', id: sent.at(-1).id, reviewToken: 'reviewed',
+  ref: 'refs/heads/main', tree: 'fixed-tree', parent: 'old', identity: {name: 'Test', email: 'test@example.invalid'},
+  message: elements['commit-message'].value, diff: '+change'});
+reviewReply();
+assert.equal(elements['commit-review'].hidden, false);
+assert.match(elements['commit-target'].textContent, /refs\/heads\/main/);
+elements['commit-message'].value = '変更したメッセージ'; elements['commit-message'].fire('input');
+assert.equal(elements['git-commit'].disabled, true, 'メッセージ変更で最終確認を失効する');
+const beforeInvalidCommit = sent.length;
+elements['git-commit'].fire('click');
+assert.equal(sent.length, beforeInvalidCommit);
+elements['git-review'].fire('click'); reviewReply();
+elements['git-commit'].fire('click');
+assert.equal(sent.at(-1).type, 'git_commit');
+assert.equal(sent.at(-1).reviewToken, 'reviewed');
+const beforeDoubleCommit = sent.length;
+elements['git-commit'].fire('click');
+assert.equal(sent.length, beforeDoubleCommit, 'Commitを連打しても再送しない');
+reply({type: 'git_commit', id: sent.at(-1).id, ref: 'refs/heads/main', commit: 'commit-id', files: []});
+assert.match(elements['git-message'].textContent, /Commit完了/);
+assert.equal(elements['commit-message'].value, '変更したメッセージ');
+assert.equal(elements['git-review'].disabled, true, '次の操作は状態再取得が必要');
+elements['git-project'].value = 'other'; elements['git-project'].fire('change');
+elements['git-refresh'].fire('click');
+assert.equal(sent.at(-1).projectId, 'other');
+assert.equal(elements.project.value, 'project', 'Git対象変更でCodexの開始位置を変えない');
+reply({type: 'git_snapshot', id: sent.at(-1).id, canModify: true, snapshotToken: 'other', files: []});
 assert.equal(elements.run.disabled, true, '送信前の明示選択が必要');
 elements.model.value = 'first';
 elements.model.fire('change');

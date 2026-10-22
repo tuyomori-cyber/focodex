@@ -18,6 +18,8 @@ import tempfile
 import time
 import uuid
 
+import git_ops
+
 CONFIG = Path(os.environ.get('FOCODEX_CONFIG', Path.home() / '.config/focodex/config.json'))
 MAX_NATIVE = 128 * 1024
 MAX_RPC = 8 * 1024 * 1024
@@ -34,45 +36,7 @@ SKIP_DISCOVERY_NAMES = {'.git', '.cache', 'node_modules', '.venv', 'venv', 'targ
 
 
 def git_read(project, *arguments):
-    env = {key: item for key, item in os.environ.items() if not key.startswith('GIT_')}
-    env.update({'PATH': '/usr/bin:/bin', 'GIT_CONFIG_NOSYSTEM': '1',
-                'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_OPTIONAL_LOCKS': '0',
-                'GIT_TERMINAL_PROMPT': '0', 'GIT_PAGER': 'cat'})
-    command = [GIT, '--no-pager', '--no-optional-locks', '-c', 'core.fsmonitor=false',
-               '-c', 'core.hooksPath=/dev/null', '-c', 'diff.external=',
-               '-c', 'color.ui=false', '-c', 'core.quotePath=false',
-               '-C', str(project), *arguments]
-    process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, start_new_session=True)
-    output_bytes = bytearray()
-    try:
-        with selectors.DefaultSelector() as reader:
-            reader.register(process.stdout, selectors.EVENT_READ)
-            deadline = time.monotonic() + 10
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise ValueError('Gitの読み取りが時間切れになりました。')
-                if not reader.select(remaining):
-                    raise ValueError('Gitの読み取りが時間切れになりました。')
-                chunk = os.read(process.stdout.fileno(), 65536)
-                if not chunk:
-                    break
-                output_bytes.extend(chunk)
-                if len(output_bytes) > MAX_GIT_OUTPUT:
-                    raise ValueError('Gitの出力が表示上限を超えました。')
-        process.wait(timeout=1)
-    finally:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
-        process.stdout.close()
-    output = output_bytes.decode('utf-8', 'replace')
-    if process.returncode:
-        raise ValueError(f'Gitの読み取りに失敗しました: {output[:2000]}')
-    return output
+    return git_ops.text(project, *arguments)
 
 
 def project_file_preview(project, name):
@@ -150,38 +114,7 @@ def git_changed_files(project):
 
 
 def git_snapshot(project):
-    project = Path(project).resolve(strict=True)
-    dotgit = project / '.git'
-    if not dotgit.exists() or dotgit.is_symlink():
-        raise ValueError('プロジェクト直下のGit管理情報を確認できません。')
-    top = Path(git_read(project, 'rev-parse', '--show-toplevel').strip()).resolve()
-    gitdir = Path(git_read(project, 'rev-parse', '--absolute-git-dir').strip()).resolve()
-    common = Path(git_read(project, 'rev-parse', '--path-format=absolute', '--git-common-dir').strip()).resolve()
-    if top != project:
-        raise ValueError('登録済みプロジェクトとGitリポジトリのルートが一致しません。')
-    if dotgit.is_dir():
-        valid = gitdir == dotgit.resolve() and common == gitdir
-    elif dotgit.is_file():
-        pointer = dotgit.read_text(encoding='utf-8', errors='replace').strip()
-        target = (project / pointer[8:]).resolve() if pointer.startswith('gitdir: ') else None
-        backlink = gitdir / 'gitdir'
-        valid = (target == gitdir and gitdir.parent.name == 'worktrees' and
-                 gitdir.parent.parent == common and backlink.is_file() and
-                 Path(backlink.read_text().strip()).resolve() == dotgit)
-    else:
-        valid = False
-    if not valid:
-        raise ValueError('Git管理ディレクトリの実体が一致しません。')
-    # Git may execute project-controlled filters, fsmonitors or diff helpers.
-    # Refuse these repositories until a dedicated helper policy is designed.
-    settings = git_read(project, 'config', '--list', '--null')
-    for entry in settings.split('\0'):
-        key = entry.split('\n', 1)[0].lower()
-        if (key.startswith(('filter.', 'include.', 'includeif.')) or
-                key == 'core.fsmonitor' and '\nfalse' not in entry or
-                key == 'diff.external' and '\n' in entry and entry.split('\n', 1)[1] or
-                re.match(r'^diff\.[^.]+\.(command|textconv)$', key)):
-            raise ValueError('外部ヘルパーを含むGit設定は現在の表示機能で扱えません。')
+    git_ops.Repository(project)
     rows = []
     used = 0
     for code, name, original in git_changed_files(project):
@@ -237,9 +170,17 @@ def read_config():
     return json.loads(CONFIG.read_text())
 
 
-def write_config(data):
-    CONFIG.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix='.config.', dir=CONFIG.parent)
+def sync_directory(directory):
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def atomic_json(path, data):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
     try:
         with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
             json.dump(data, stream, ensure_ascii=False, indent=2)
@@ -247,18 +188,64 @@ def write_config(data):
             stream.flush()
             os.fsync(stream.fileno())
         os.chmod(temporary, 0o600)
-        os.replace(temporary, CONFIG)
-        directory = os.open(CONFIG.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        os.replace(temporary, path)
+        sync_directory(path.parent)
     except Exception:
         try:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
         raise
+
+
+def write_config(data):
+    atomic_json(CONFIG, data)
+
+
+def boot_id():
+    # Linux boot identity, not PID liveness: an orphan may outlive its leader.
+    return str(uuid.UUID(Path('/proc/sys/kernel/random/boot_id').read_text().strip()))
+
+
+def execution_path():
+    return CONFIG.with_suffix('.execution.json')
+
+
+def execution_state():
+    path = execution_path()
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
+    except (ValueError, OSError) as error:
+        raise ValueError('実行記録を確認できません。Codex・Git操作を禁止します。') from error
+    if (not isinstance(data, dict) or data.get('version') != 1 or
+            not isinstance(data.get('token'), str) or not data['token'] or
+            not isinstance(data.get('bootId'), str)):
+        raise ValueError('実行記録が不正です。Codex・Git操作を禁止します。')
+    try:
+        data['bootId'] = str(uuid.UUID(data['bootId']))
+    except ValueError as error:
+        raise ValueError('実行記録の起動IDが不正です。Codex・Git操作を禁止します。') from error
+    return data
+
+
+def remove_execution_state():
+    execution_path().unlink()
+    sync_directory(execution_path().parent)
+
+
+def require_confirmed_idle():
+    """Call only while holding the shared lock, including future Git writes."""
+    state = execution_state()
+    if state is None:
+        return
+    if state['bootId'] != boot_id():
+        # A reboot proves that the recorded invocation and its descendants died.
+        remove_execution_state()
+        return
+    raise ValueError('前回のCodex終了が未確認です。Codex・Git操作と設定変更を禁止します。'
+                     'OS再起動後に再接続してください。実行記録は削除しないでください。')
 
 
 def config(data=None):
@@ -450,6 +437,9 @@ class Host:
         self.rpc_buffer = bytearray()
         self.process = None
         self.lock = None
+        self.execution_token = None
+        self.git_snapshots = {}
+        self.git_reviews = {}
         self.request_id = None
         self.thread_id = None
         self.turn_id = None
@@ -485,41 +475,59 @@ class Host:
 
     def cleanup(self):
         process_state = None
-        if self.process:
-            process = self.process
-            process_state = {'leaderExitCode': None, 'processGroupGone': False,
-                             'terminationSignal': None}
-            self.selector.unregister(process.stdout)
-            # Kill only the dedicated process group created for this invocation.
-            for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            if self.process:
+                process = self.process
+                process_state = {'leaderExitCode': None, 'processGroupGone': False,
+                                 'terminationSignal': None}
                 try:
-                    os.killpg(process.pid, sig)
-                    process_state['terminationSignal'] = signal.Signals(sig).name
+                    self.selector.unregister(process.stdout)
+                except KeyError:
+                    pass
+                # Kill only the dedicated process group created for this invocation.
+                for sig in (signal.SIGTERM, signal.SIGKILL):
+                    try:
+                        os.killpg(process.pid, sig)
+                        process_state['terminationSignal'] = signal.Signals(sig).name
+                    except ProcessLookupError:
+                        break
+                    if sig == signal.SIGTERM:
+                        deadline = time.monotonic() + 1
+                        while time.monotonic() < deadline:
+                            process.poll()  # Reap the leader before checking its group.
+                            try:
+                                os.killpg(process.pid, 0)
+                            except ProcessLookupError:
+                                break
+                            time.sleep(0.02)
+                process_state['leaderExitCode'] = process.wait(timeout=3)
+                try:
+                    os.killpg(process.pid, 0)
                 except ProcessLookupError:
-                    break
-                if sig == signal.SIGTERM:
-                    deadline = time.monotonic() + 1
-                    while time.monotonic() < deadline:
-                        process.poll()  # Reap the leader before checking its group.
-                        try:
-                            os.killpg(process.pid, 0)
-                        except ProcessLookupError:
-                            break
-                        time.sleep(0.02)
-            process_state['leaderExitCode'] = process.wait(timeout=3)
-            try:
-                os.killpg(process.pid, 0)
-            except ProcessLookupError:
-                process_state['processGroupGone'] = True
-            if not process_state['processGroupGone']:
-                self.cleanup_uncertain = True
-            process.stdin.close()
-            process.stdout.close()
-            self.process = None
-        if self.lock:
-            self.lock.close()
-            self.lock = None
-        self.rpc_buffer.clear()
+                    process_state['processGroupGone'] = True
+                if not process_state['processGroupGone']:
+                    self.cleanup_uncertain = True
+                process.stdin.close()
+                process.stdout.close()
+                self.process = None
+            if self.execution_token:
+                if process_state and process_state['processGroupGone']:
+                    state = execution_state()
+                    if state is None or state['token'] != self.execution_token:
+                        raise ValueError('実行記録が一致しません。終了状態を確定できません。')
+                    remove_execution_state()
+                    self.execution_token = None
+                else:
+                    self.cleanup_uncertain = True
+        except BaseException:
+            self.cleanup_uncertain = True
+            raise
+        finally:
+            # OS locks disappear on Host death. The durable record does not.
+            if self.lock:
+                self.lock.close()
+                self.lock = None
+            self.rpc_buffer.clear()
         return process_state
 
     def finish(self, status, error=None):
@@ -576,6 +584,11 @@ class Host:
         except BlockingIOError:
             lock.close()
             raise ValueError('別のFocodexタブで実行中です。')
+        try:
+            require_confirmed_idle()
+        except BaseException:
+            lock.close()
+            raise
         return lock
 
     def command(self, value):
@@ -706,20 +719,8 @@ class Host:
         if value.get('type') == 'respond':
             self.respond(value)
             return
-        if value.get('type') == 'git_snapshot':
-            if self.process or self.cleanup_uncertain:
-                raise ValueError('Codex実行中または終了未確認のためGit状態を取得できません。')
-            _, projects, _ = config()
-            project_id = value.get('projectId')
-            if not isinstance(project_id, str) or project_id not in projects:
-                raise ValueError('未登録のプロジェクトです。')
-            with CONFIG.with_suffix('.lock').open('a') as lock:
-                try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    raise ValueError('別のFocodexタブで実行中です。')
-                snapshot = git_snapshot(projects[project_id]['path'])
-            send({'type': 'git_snapshot', 'id': request_id, **snapshot})
+        if value.get('type') in ('git_snapshot', 'git_stage', 'git_review', 'git_commit'):
+            self.git_command(value)
             return
         if value.get('type') not in ('run', 'models'):
             raise ValueError('未対応の操作です。')
@@ -727,6 +728,8 @@ class Host:
             raise ValueError('前回の専用プロセス群の終了を確認できません。再実行できません。')
         if self.process:
             raise ValueError('実行中です。同時実行は1件です。')
+        self.git_snapshots.clear()
+        self.git_reviews.clear()
         data = read_config()
         executable, projects, workspaces = config(data)
         workspace_id = value.get('workspaceId')
@@ -741,13 +744,9 @@ class Host:
             catalog_key = (workspace_id, cwd)
             if model is not None and (not isinstance(model, str) or model not in self.catalogs.get(catalog_key, set())):
                 raise ValueError('モデル一覧を取得し、候補からモデルを選択してください。')
-        self.lock = CONFIG.with_suffix('.lock').open('a')
-        try:
-            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            self.lock.close()
-            self.lock = None
-            raise ValueError('別のFocodexタブで実行中です。')
+        if any(CONFIG.resolve().is_relative_to(root) or CONFIG.parent.resolve().is_relative_to(root) for root in workspace['paths']):
+            raise ValueError('Host設定と実行記録はCodexの編集対象外に配置してください。')
+        self.lock = self.locked_config()
         self.cwd = cwd
         self.workspace_id = workspace_id
         self.workspace_roots = workspace['paths']
@@ -769,6 +768,11 @@ class Host:
         self.items = {}
         self.started = time.monotonic()
         try:
+            token = secrets.token_urlsafe(24)
+            atomic_json(execution_path(), {'version': 1, 'token': token,
+                        'bootId': boot_id(), 'operation': operation,
+                        'workspaceRoots': self.workspace_roots, 'startedAt': time.time()})
+            self.execution_token = token
             self.process = subprocess.Popen(
                 codex_args(executable, self.workspace_roots), cwd=self.cwd,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
@@ -782,6 +786,89 @@ class Host:
             self.request_id = None
             raise
         send({'type': 'started', 'id': request_id})
+
+    def git_command(self, value):
+        operation = value['type']
+        fields = {'git_snapshot': set(), 'git_stage': {'files', 'snapshotToken'},
+                  'git_review': {'message'}, 'git_commit': {'reviewToken'}}
+        if set(value) - ({'type', 'id', 'projectId', 'workspaceId'} | fields[operation]):
+            raise ValueError('未対応のGit引数です。')
+        if self.process or self.cleanup_uncertain:
+            raise ValueError('実行中または終了未確認のためGit操作はできません。')
+        if not isinstance(value.get('projectId'), str) or (value.get('workspaceId') is not None and not isinstance(value['workspaceId'], str)):
+            raise ValueError('Git操作対象IDが不正です。')
+        with self.locked_config():
+            data = read_config()
+            _, projects, workspaces = config(data)
+            project_id = value.get('projectId')
+            workspace_id, _, project = selected_workspace(data, projects, workspaces,
+                                                        value.get('workspaceId'), project_id)
+            if workspace_id == '__standalone__':
+                raise ValueError('Git変更操作は登録済みワークスペースを選択してください。')
+            if CONFIG.resolve().is_relative_to(project) or CONFIG.parent.resolve().is_relative_to(project):
+                raise ValueError('Host設定と実行記録はGit対象の外に配置してください。')
+            key = (workspace_id, project_id, project)
+            token = secrets.token_urlsafe(24)
+            atomic_json(execution_path(), {'version': 1, 'token': token, 'bootId': boot_id(),
+                        'operation': operation, 'workspaceRoots': [project], 'startedAt': time.time()})
+            repo = None
+            try:
+                repo = git_ops.Repository(project)
+                if operation == 'git_snapshot':
+                    result = git_snapshot(project)
+                    try:
+                        repo.writable()
+                        fingerprint = repo.fingerprint()
+                        snapshot_token = secrets.token_urlsafe(24)
+                        self.git_snapshots[key] = (snapshot_token, fingerprint, time.monotonic())
+                        result.update(snapshotToken=snapshot_token, canModify=True)
+                    except git_ops.UncertainGit:
+                        raise
+                    except (ValueError, OSError) as error:
+                        result.update(canModify=False, modificationError=str(error))
+                    self.git_reviews.pop(key, None)
+                elif operation == 'git_stage':
+                    snapshot = self.git_snapshots.pop(key, None)
+                    self.git_reviews.pop(key, None)
+                    if not snapshot or value.get('snapshotToken') != snapshot[0] or time.monotonic() - snapshot[2] > 900:
+                        raise ValueError('Git状態を再取得してからファイルを選択してください。')
+                    repo.stage(value.get('files'), snapshot[1])
+                    repo.uncertain = True
+                    result = git_snapshot(project)
+                    snapshot_token = secrets.token_urlsafe(24)
+                    self.git_snapshots[key] = (snapshot_token, git_ops.Repository(project).fingerprint(), time.monotonic())
+                    result.update(canModify=True, snapshotToken=snapshot_token)
+                elif operation == 'git_review':
+                    self.git_reviews.pop(key, None)
+                    review = repo.review(value.get('message'))
+                    review_token = secrets.token_urlsafe(24)
+                    self.git_reviews[key] = (review_token, review, time.monotonic())
+                    result = {k: review[k] for k in ('tree', 'ref', 'parent', 'message', 'identity', 'diff')}
+                    result['reviewToken'] = review_token
+                else:
+                    stored = self.git_reviews.pop(key, None)
+                    self.git_snapshots.pop(key, None)
+                    if not stored or value.get('reviewToken') != stored[0] or time.monotonic() - stored[2] > 900:
+                        raise ValueError('Commit内容を最終確認してください。')
+                    result = repo.commit(stored[1])
+                    repo.uncertain = True
+                    result['files'] = git_snapshot(project)['files']
+                state = execution_state()
+                if not state or state['token'] != token:
+                    raise git_ops.UncertainGit('Git実行記録を照合できません。')
+                remove_execution_state()
+                repo.uncertain = False
+            except BaseException as error:
+                if isinstance(error, git_ops.UncertainGit) or repo is not None and repo.uncertain or not isinstance(error, (ValueError, OSError)):
+                    self.cleanup_uncertain = True
+                else:
+                    state = execution_state()
+                    if state and state['token'] == token:
+                        remove_execution_state()
+                    else:
+                        self.cleanup_uncertain = True
+                raise
+        send({'type': operation, 'id': value['id'], **result})
 
     def respond(self, value):
         pending = self.pending_request

@@ -17,11 +17,29 @@ let configuredDiscoveryRoots = new Set();
 let scanAfterRootAdd = null;
 let managerOperation = null;
 let editingWorkspaceId = null;
+let gitSnapshotToken = null;
+let gitReviewToken = null;
+let gitCanModify = false;
+let gitSelections = new Map();
+function clearGitReview() {
+  gitReviewToken = null;
+  $("commit-review").hidden = true;
+}
+function resetGit() {
+  gitSnapshotToken = null; gitCanModify = false; gitSelections.clear(); clearGitReview();
+  $("git-message").textContent = ""; $("git-files").replaceChildren();
+}
 function currentWorkspace() { return workspaces.get($("workspace").value); }
 function currentProject() { return $("project").value; }
 function showWorkspaceProjects() {
   const workspace = currentWorkspace();
   const standalone = $("workspace").value === "__standalone__";
+  resetGit();
+  $("git-project").replaceChildren();
+  if (!standalone && workspace) {
+    for (const project of workspace.projects) $("git-project").append(new Option(`${project.name} (${project.path})`, project.id));
+    $("git-project").value = workspace.defaultProjectId;
+  }
   $("workspace-choice").hidden = false;
   $("project").replaceChildren();
   $("git-message").textContent = "";
@@ -213,6 +231,7 @@ function gitStatusLabel(code) {
 }
 function showGitFiles(files) {
   $("git-files").replaceChildren();
+  gitSelections.clear();
   if (!files.length) {
     $("git-files").textContent = "変更なし";
     return;
@@ -238,11 +257,20 @@ function showGitFiles(files) {
       note.textContent = "表示できるテキスト差分はありません。";
       details.append(note);
     }
+    const label = document.createElement("label"), input = document.createElement("input");
+    input.type = "checkbox"; input.checked = false;
+    input.stageable = file.status === "??" || file.status[1] !== " ";
+    input.disabled = !gitCanModify || !input.stageable;
+    input.addEventListener("change", controls);
+    label.append(input, " このファイルをステージ");
+    details.append(label);
+    gitSelections.set(file.path, input);
     $("git-files").append(details);
   }
 }
 function fetchModels() {
   if (!port || busy || !$("project").value) return;
+  resetGit();
   clearModels();
   pendingId = crypto.randomUUID();
   pendingKind = "models";
@@ -258,23 +286,45 @@ function fetchModels() {
   }
   controls();
 }
-function fetchGitSnapshot() {
-  if (!port || busy || !$("project").value) return;
-  pendingId = crypto.randomUUID();
-  pendingKind = "git_snapshot";
-  busy = true;
-  $("git-message").textContent = "Git状態を取得中…";
-  $("git-files").replaceChildren();
+function gitRequest(type, payload = {}) {
+  if (!port || busy || !$("git-project").value || managerRequestId) return;
+  pendingId = crypto.randomUUID(); pendingKind = type; busy = true;
+  $("git-message").textContent = ({git_snapshot: "Git状態を取得中…", git_stage: "選択ファイルをステージ中…",
+    git_review: "ステージ済み全体を確認中…", git_commit: "確認済みの内容をCommit中…"})[type];
   try {
-    port.postMessage({type: "git_snapshot", id: pendingId, projectId: $("project").value});
+    port.postMessage({type, id: pendingId, workspaceId: $("workspace").value,
+      projectId: $("git-project").value, ...payload});
   } catch (error) {
-    busy = false;
-    pendingId = null;
-    pendingKind = null;
-    $("git-message").textContent = `Git取得エラー: ${error.message}`;
+    busy = false; pendingId = null; pendingKind = null;
+    $("git-message").textContent = `Git操作エラー: ${error.message}`;
   }
   controls();
 }
+function fetchGitSnapshot() {
+  if (busy) return;
+  resetGit();
+  gitRequest("git_snapshot");
+}
+$("git-project").addEventListener("change", () => { resetGit(); controls(); });
+$("git-stage").addEventListener("click", () => {
+  if (busy || !gitSnapshotToken) return;
+  const files = [...gitSelections].filter(([, input]) => input.checked && !input.disabled).map(([path]) => path);
+  if (!files.length) return;
+  clearGitReview();
+  gitRequest("git_stage", {files, snapshotToken: gitSnapshotToken});
+});
+$("git-review").addEventListener("click", () => {
+  if (!gitCanModify || busy) return;
+  clearGitReview();
+  gitRequest("git_review", {message: $("commit-message").value});
+});
+$("git-commit").addEventListener("click", () => {
+  if (!gitReviewToken || busy) return;
+  const reviewToken = gitReviewToken;
+  clearGitReview();
+  gitRequest("git_commit", {reviewToken});
+});
+$("commit-message").addEventListener("input", () => { clearGitReview(); controls(); });
 function managerRequest(type, payload = {}) {
   if (!port || busy || managerRequestId) return;
   managerRequestId = crypto.randomUUID();
@@ -288,8 +338,6 @@ function managerRequest(type, payload = {}) {
   controls();
 }
 $("project").addEventListener("change", () => {
-  $("git-message").textContent = "";
-  $("git-files").replaceChildren();
   fetchModels();
 });
 $("workspace").addEventListener("change", () => {
@@ -358,10 +406,19 @@ function controls() {
   $("project").disabled = busy || !port || !$("project").options.length;
   $("model").disabled = busy || !port || $("model").options.length < 2;
   $("refresh-models").disabled = $("project").disabled;
-  $("git-refresh").disabled = busy || !port || !$("project").value || $("workspace").value === "__standalone__";
-  $("run").disabled = $("project").disabled || $("model").disabled || !$("model").value || !$("prompt").value.trim();
+  const gitBusy = busy || !port || Boolean(managerRequestId) || !$("git-project").value;
+  $("git-project").disabled = busy || !port || Boolean(managerRequestId) || !$("git-project").options.length;
+  $("git-refresh").disabled = gitBusy;
+  $("git-stage").disabled = gitBusy || !gitSnapshotToken || ![...gitSelections.values()].some(input => input.checked && !input.disabled);
+  $("git-review").disabled = gitBusy || !gitCanModify || !$("commit-message").value.trim();
+  $("git-commit").disabled = gitBusy || !gitReviewToken;
+  $("commit-message").disabled = busy;
+  for (const input of gitSelections.values()) input.disabled = busy || !gitCanModify || !input.stageable;
+  $("run").disabled = window.focodexDraftReady === false || $("project").disabled || $("model").disabled || !$("model").value || !$("prompt").value.trim();
   $("stop").disabled = !port || !busy || pendingKind !== "run" || stopping;
   $("prompt").disabled = busy;
+  $("prompt").readOnly = window.focodexDraftReady === false;
+  window.focodexDraftRefresh?.(busy);
   const cannotReply = !interaction || stopping || Boolean(responseRequestId);
   $("approve").disabled = cannotReply || !interaction?.approvable;
   $("decline").disabled = cannotReply;
@@ -369,7 +426,7 @@ function controls() {
   // A detection root only updates Focodex's local configuration.  Keep that
   // action available while a model-list request is in progress, so connecting
   // to a slow Codex CLI never traps the user in a disabled manager UI.
-  $("add-discovery-root").disabled = !port || Boolean(managerRequestId);
+  $("add-discovery-root").disabled = !port || Boolean(managerRequestId) || (busy && pendingKind?.startsWith("git_"));
   for (const id of ["scan-repositories", "save-workspace"]) {
     $(id).disabled = busy || !port || Boolean(managerRequestId);
   }
@@ -397,6 +454,7 @@ $("connect").addEventListener("click", () => {
     stopping = false;
     stopRequestId = null;
     clearInteraction();
+    resetGit();
     $("status").textContent = error ? `接続エラー: ${error}` : "接続が切れました。実行結果は未確認です。";
     controls();
   });
@@ -434,13 +492,27 @@ $("connect").addEventListener("click", () => {
       }
       showRepositoryRows();
       $("manager-message").textContent = `${(message.repositories || []).length}件のリポジトリを検出しました。`;
-    } else if (message.type === "git_snapshot" && message.id === pendingId && pendingKind === "git_snapshot") {
-      busy = false;
-      pendingId = null;
-      pendingKind = null;
-      showGitFiles(Array.isArray(message.files) ? message.files : []);
+    } else if (["git_snapshot", "git_stage", "git_review", "git_commit"].includes(message.type) &&
+               message.id === pendingId && pendingKind === message.type) {
+      busy = false; pendingId = null; pendingKind = null;
       $("diff-panel").open = true;
-      $("git-message").textContent = "取得完了";
+      if (message.type === "git_review") {
+        gitReviewToken = message.reviewToken;
+        $("commit-review").hidden = false;
+        $("commit-target").textContent = `対象: ${$("git-project").value} / ${message.ref} / 作者: ${message.identity.name} <${message.identity.email}>`;
+        $("commit-confirm-message").textContent = message.message;
+        $("commit-diff").textContent = message.diff;
+        $("git-message").textContent = "ステージ済み全体とメッセージを確認してCommitしてください。";
+      } else {
+        clearGitReview();
+        gitCanModify = message.canModify === true;
+        gitSnapshotToken = message.snapshotToken || null;
+        showGitFiles(Array.isArray(message.files) ? message.files : []);
+        $("git-message").textContent = message.type === "git_commit"
+          ? `Commit完了: ${message.commit}（${message.ref}）。次の操作はGit状態を再取得してください。`
+          : message.modificationError ? `取得完了・変更操作不可: ${message.modificationError}`
+          : message.type === "git_stage" ? "ステージ完了。ステージ済み全体を最終確認してください。" : "取得完了";
+      }
     } else if (message.type === "models" && message.id === pendingId && pendingKind === "models") {
       busy = false;
       pendingId = null;
@@ -494,8 +566,9 @@ $("connect").addEventListener("click", () => {
       }
     } else if (message.type === "error") {
       // Validation errors do not cancel a different in-flight request.
-      if (message.id === pendingId && pendingKind === "git_snapshot") {
-        $("git-message").textContent = `Git取得エラー: ${message.error}`;
+      if (message.id === pendingId && pendingKind?.startsWith("git_")) {
+        resetGit();
+        $("git-message").textContent = `Git操作エラー: ${message.error} Git状態を再取得してください。`;
       } else {
         $("status").textContent = `エラー: ${message.error}`;
       }
@@ -552,10 +625,12 @@ $("stop").addEventListener("click", () => {
   controls();
 });
 $("form").addEventListener("submit", event => {
+  clearGitReview();
   event.preventDefault();
-  if (busy || !port || !$("project").value || !$("model").value || !$("prompt").value.trim()) return;
+  if (window.focodexDraftReady === false || busy || !port || !$("project").value || !$("model").value || !$("prompt").value.trim()) return;
   pendingId = crypto.randomUUID();
   pendingKind = "run";
+  resetGit();
   stopping = false;
   stopRequestId = null;
   clearInteraction();

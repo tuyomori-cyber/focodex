@@ -5,7 +5,7 @@
 <title>Focodex 接続検証</title>
 <link rel="stylesheet" href="probe.css">
 <main>
-  <h1>Focodex 接続検証 <small>v0.1.10</small></h1>
+  <h1>Focodex 接続検証 <small>v0.1.11</small></h1>
   <button id="connect">Hostへ接続</button>
   <button id="manage-workspaces" type="button" disabled>ワークスペースを管理</button>
   <button id="help" type="button" aria-expanded="false">ヘルプ</button>
@@ -42,18 +42,29 @@
   <details id="request-panel" open>
     <summary>要求</summary>
     <form id="form">
-    <div id="workspace-choice">
-      <label for="workspace">ワークスペース</label>
-      <select id="workspace" disabled></select>
-    </div>
-    <p id="workspace-members" class="policy-notice"></p>
-    <label for="project">開始プロジェクト</label>
-    <select id="project" disabled></select>
-    <label for="model">モデル</label>
-    <select id="model" disabled><option value="">モデルを選択してください</option></select>
-    <button id="refresh-models" type="button" disabled>モデル一覧を再取得</button>
+    <details id="execution-settings" open>
+      <summary>実行設定</summary>
+      <div id="workspace-choice">
+        <label for="workspace">ワークスペース</label>
+        <select id="workspace" disabled></select>
+      </div>
+      <p id="workspace-members" class="policy-notice"></p>
+      <label for="project">開始プロジェクト</label>
+      <select id="project" disabled></select>
+      <label for="model">モデル</label>
+      <select id="model" disabled><option value="">モデルを選択してください</option></select>
+      <button id="refresh-models" type="button" disabled>モデル一覧を再取得</button>
+    </details>
+    <details id="received-draft" hidden>
+      <summary>fox-voice-editorからの受信バッファ</summary>
+      <button id="draft-reconnect" type="button">受信を再接続</button>
+      <span id="draft-connection-status" role="status" aria-live="polite"></span>
+      <div id="received-text"></div>
+    </details>
     <label for="prompt">指示文</label>
-    <textarea id="prompt" rows="5" maxlength="20000">ツールを使わず、ファイルの読み書きやコマンド実行をせずに、「Focodex接続成功」とだけ返答してください。</textarea>
+    <textarea id="prompt" rows="5" maxlength="20000"></textarea>
+    <button id="undo-prompt" type="button" hidden>元に戻す</button>
+    <button id="clear-prompt" type="button" hidden>クリア</button>
     <button id="run" disabled>Codexへ送信</button>
     <button id="stop" type="button" disabled>停止</button>
     </form>
@@ -82,13 +93,29 @@
     <details><summary>接続・実行情報</summary><pre id="info"></pre></details>
   </details>
   <details id="diff-panel">
-    <summary>差分</summary>
+    <summary>Git・差分・Commit</summary>
     <section id="git-panel">
+    <label for="git-project">Git操作対象</label>
+    <select id="git-project" disabled></select>
     <button id="git-refresh" type="button" disabled>Git状態を取得</button>
     <p id="git-message" role="status"></p>
     <div id="git-files"></div>
+    <button id="git-stage" type="button" disabled>選択ファイルをステージ</button>
+    <label for="commit-message">コミットメッセージ</label>
+    <textarea id="commit-message" rows="4" maxlength="20000"></textarea>
+    <button id="undo-commit" type="button" hidden>元に戻す</button>
+    <button id="clear-commit" type="button" hidden>クリア</button>
+    <button id="git-review" type="button" disabled>ステージ済み全体を最終確認</button>
+    <section id="commit-review" hidden>
+      <h3>この内容をCommitします</h3>
+      <p id="commit-target"></p>
+      <pre id="commit-confirm-message"></pre>
+      <pre id="commit-diff"></pre>
+      <button id="git-commit" type="button" disabled>確認した内容をCommit</button>
+    </section>
     </section>
   </details>
 </main>
 <script src="probe.js"></script>
+<script src="draft-client.js"></script>
 </html>

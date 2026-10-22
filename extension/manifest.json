@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Focodex 接続検証",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Native Messaging経由でCodexと一往復する検証版",
   "browser_specific_settings": {
     "gecko": {"id": "focodex@foxbook.example", "data_collection_permissions": {"required": ["none"]}}
   },
-  "permissions": ["nativeMessaging", "tabs"],
-  "background": {"scripts": ["background.js"]},
+  "permissions": ["nativeMessaging", "tabs", "storage"],
+  "background": {"scripts": ["draft-background.js", "background.js"]},
   "action": {"default_title": "Focodex 接続検証を開く"}
 }
