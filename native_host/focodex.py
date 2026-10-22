@@ -803,8 +803,6 @@ class Host:
             project_id = value.get('projectId')
             workspace_id, _, project = selected_workspace(data, projects, workspaces,
                                                         value.get('workspaceId'), project_id)
-            if workspace_id == '__standalone__':
-                raise ValueError('Git変更操作は登録済みワークスペースを選択してください。')
             if CONFIG.resolve().is_relative_to(project) or CONFIG.parent.resolve().is_relative_to(project):
                 raise ValueError('Host設定と実行記録はGit対象の外に配置してください。')
             key = (workspace_id, project_id, project)

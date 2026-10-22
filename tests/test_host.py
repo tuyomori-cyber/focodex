@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -361,6 +362,24 @@ class HostTests(unittest.TestCase):
         probe.write_message(self.host, {'type': 'run', 'id': 'x', 'projectId': '../other', 'text': 'hello'})
         self.assertEqual(probe.read_message(self.host)['type'], 'error')
         self.assertFalse(self.pid.exists())
+
+    def test_standalone_git_is_rejected_while_codex_runs(self):
+        root = Path(self.temp.name)
+        repository = root / 'standalone'
+        (repository / '.git').mkdir(parents=True)
+        self.config.write_text(json.dumps({'codex': str(root / 'codex'), 'projects': {
+            'test': {'name': 'テスト', 'path': str(root)}},
+            'discoveryRoots': [str(root)]}))
+        project_id = 'repo_' + hashlib.sha256(str(repository.resolve()).encode()).hexdigest()
+        probe.write_message(self.host, {'type': 'run', 'id': 'run-standalone',
+                                        'workspaceId': '__standalone__', 'projectId': project_id,
+                                        'text': 'hang'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'started')
+        probe.write_message(self.host, {'type': 'git_snapshot', 'id': 'git-while-run',
+                                        'workspaceId': '__standalone__', 'projectId': project_id})
+        reply = probe.read_message(self.host)
+        self.assertEqual(reply['type'], 'error')
+        self.assertIn('実行中', reply['error'])
 
     def test_workspace_allows_only_its_declared_projects(self):
         root = Path(self.temp.name)

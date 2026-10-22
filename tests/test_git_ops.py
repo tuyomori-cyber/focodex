@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -71,6 +72,40 @@ class GitTests(unittest.TestCase):
         result = self.request('git_review', message=message)
         self.assertEqual(result['type'], 'git_review', result)
         return result
+
+    def configure_standalone(self):
+        self.config.write_text(json.dumps({'codex': '/usr/bin/false', 'projects': {},
+                                           'workspaces': {}, 'discoveryRoots': [str(self.root)]}))
+        return 'repo_' + hashlib.sha256(str(self.repo.resolve()).encode()).hexdigest()
+
+    def standalone_request(self, kind, project_id, **values):
+        return self.request(kind, workspaceId='__standalone__', projectId=project_id, **values)
+
+    def test_standalone_git_commit_uses_existing_tokens_and_rejects_unselected_or_changed_target(self):
+        project_id = self.configure_standalone()
+        missing = 'repo_' + hashlib.sha256(b'/not-a-discovered-repository').hexdigest()
+        self.assertEqual(self.standalone_request('git_snapshot', missing)['type'], 'error')
+
+        (self.repo / 'a.txt').write_text('standalone first\n')
+        snapshot = self.standalone_request('git_snapshot', project_id)
+        self.assertTrue(snapshot['canModify'], snapshot)
+        staged = self.standalone_request('git_stage', project_id,
+                                         snapshotToken=snapshot['snapshotToken'], files=['a.txt'])
+        self.assertEqual(staged['type'], 'git_stage', staged)
+        review = self.standalone_request('git_review', project_id, message='standalone commit')
+        self.assertEqual(review['type'], 'git_review', review)
+        committed = self.standalone_request('git_commit', project_id, reviewToken=review['reviewToken'])
+        self.assertEqual(committed['type'], 'git_commit', committed)
+
+        (self.repo / 'a.txt').write_text('standalone staged again\n')
+        snapshot = self.standalone_request('git_snapshot', project_id)
+        staged = self.standalone_request('git_stage', project_id,
+                                         snapshotToken=snapshot['snapshotToken'], files=['a.txt'])
+        self.assertEqual(staged['type'], 'git_stage', staged)
+        review = self.standalone_request('git_review', project_id, message='must reconfirm')
+        (self.repo / 'a.txt').write_text('changed after standalone review\n')
+        self.assertEqual(self.standalone_request('git_commit', project_id,
+                                                 reviewToken=review['reviewToken'])['type'], 'error')
 
     def test_selected_stage_preserves_existing_and_commits_exact_tree(self):
         (self.repo / 'b.txt').write_text('pre-staged\n')

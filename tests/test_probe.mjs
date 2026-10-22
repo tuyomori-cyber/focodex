@@ -32,7 +32,8 @@ vm.runInNewContext(fs.readFileSync(new URL('../extension/probe.js', import.meta.
 });
 const reply = value => port.onMessage.emit(value);
 elements.connect.fire('click');
-reply({type: 'projects', id: sent.at(-1).id, discoveryRoots: [], discoveryRootCandidates: ['/repos'], workspaces: [{id: 'workspace', name: 'Workspace', defaultProjectId: 'project', projects: [{id: 'project', name: 'Project', path: '/project'}, {id: 'other', name: 'Other', path: '/other'}]}]});
+const initialProjectsId = sent.at(-1).id;
+reply({type: 'projects', id: initialProjectsId, discoveryRoots: [], discoveryRootCandidates: ['/repos'], standaloneProjects: [{id: 'repo_discovered', name: 'Discovered', path: '/repos/discovered'}], workspaces: [{id: 'workspace', name: 'Workspace', defaultProjectId: 'project', projects: [{id: 'project', name: 'Project', path: '/project'}, {id: 'other', name: 'Other', path: '/other'}]}]});
 assert.equal(sent.at(-1).type, 'projects');
 assert.match(elements['workspace-members'].textContent, /Project.*Other/);
 assert.equal(elements['workspace-choice'].hidden, false, '単独リポジトリ選択のため常に表示する');
@@ -244,4 +245,13 @@ assert.equal(sent.at(-1).answers.detail, '自由回答');
 assert.equal(sent.at(-1).itemId, 'question-item');
 reply({type: 'answered', id: runId, requestId: 'question-1'});
 reply({type: 'result', id: runId, status: 'completed'});
+reply({type: 'projects', id: initialProjectsId, selectedWorkspaceId: '__standalone__', discoveryRoots: [],
+  standaloneProjects: [{id: 'repo_discovered', name: 'Discovered', path: '/repos/discovered'}],
+  workspaces: [{id: 'workspace', name: 'Workspace', defaultProjectId: 'project',
+    projects: [{id: 'project', name: 'Project', path: '/project'}, {id: 'other', name: 'Other', path: '/other'}]}]});
+assert.equal(elements['git-project'].value, 'repo_discovered', '単独リポジトリもGit対象として選択する');
+elements['git-refresh'].fire('click');
+assert.equal(sent.at(-1).type, 'git_snapshot');
+assert.equal(sent.at(-1).workspaceId, '__standalone__');
+assert.equal(sent.at(-1).projectId, 'repo_discovered');
 console.log('モデル選択・停止診断・承認・追加質問の画面ロジック: OK');

@@ -36,10 +36,9 @@ function showWorkspaceProjects() {
   const standalone = $("workspace").value === "__standalone__";
   resetGit();
   $("git-project").replaceChildren();
-  if (!standalone && workspace) {
-    for (const project of workspace.projects) $("git-project").append(new Option(`${project.name} (${project.path})`, project.id));
-    $("git-project").value = workspace.defaultProjectId;
-  }
+  const gitProjects = standalone ? standaloneProjects : workspace?.projects || [];
+  for (const project of gitProjects) $("git-project").append(new Option(`${project.name} (${project.path})`, project.id));
+  if (!standalone && workspace) $("git-project").value = workspace.defaultProjectId;
   $("workspace-choice").hidden = false;
   $("project").replaceChildren();
   $("git-message").textContent = "";
@@ -128,7 +127,7 @@ function applyWorkspaceConfig(message) {
   $("workspace").replaceChildren();
   for (const workspace of workspaces.values()) $("workspace").append(new Option(workspace.name, workspace.id));
   $("workspace").append(new Option("単独リポジトリ", "__standalone__"));
-  if (workspaces.has(message.selectedWorkspaceId)) $("workspace").value = message.selectedWorkspaceId;
+  if (message.selectedWorkspaceId === "__standalone__" || workspaces.has(message.selectedWorkspaceId)) $("workspace").value = message.selectedWorkspaceId;
   else if (workspaces.has(previous)) $("workspace").value = previous;
   editingWorkspaceId = currentWorkspace()?.id || null;
   $("discovery-root").replaceChildren();
