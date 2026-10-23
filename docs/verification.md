@@ -341,4 +341,6 @@ Git用の起動前永続記録と共有ロックを追加。設定・属性・�
 
 Surfaceでは専用AgentへGitHub用鍵をdestination constraint付きで登録し、ソケットの本人所有・`0600`を確認した。更新Hostと拡張の再読み込み後、画面に「読み取り専用SSH接続試験」ボタンが表示された。実行前のリモート事前診断は、scp形式のremote URLを許可しないため拒否した。
 
-その後、Host再登録・拡張再読み込みの過程で前回Codexの専用プロセス群の終了を確認できない永続記録が残った。Focodexは意図どおりCodex・Git操作・設定変更を拒否し、画面にOS再起動後の再接続と実行記録を削除しない旨を表示した。実upstreamへのSSH接続は未実行である。SurfaceをOS再起動後、`origin`を明示的な`ssh://`形式にしてから、同試験を再開する。
+その後、Host再登録・拡張再読み込みの過程で前回Codexの専用プロセス群の終了を確認できない永続記録が残った。Focodexは意図どおりCodex・Git操作・設定変更を拒否し、画面にOS再起動後の再接続と実行記録を削除しない旨を表示した。
+
+OS再起動後の再試験では、専用Agentのソケット確認、中継終了待機、Sandbox内のUID解決、Agent鍵の選択を順に修正した。`git-test` の`origin`を実在する明示的な`ssh://` URLへ設定後、Firefoxの「読み取り専用SSH接続試験」で「upstreamを確認しました」と表示された。固定宛先・専用Agent・最小known_hosts・中継を通る`git ls-remote --exit-code`だけが実行され、Fetch、Pull、Push、作業ツリー・参照の変更は行っていない。自動試験は64件成功した。

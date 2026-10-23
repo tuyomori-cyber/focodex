@@ -16,6 +16,10 @@ import git_ops
 
 BWRAP = '/usr/bin/bwrap'
 TIMEOUT = 10
+# A relay may be waiting in accept()/select() for up to TIMEOUT after its
+# sandbox client has exited.  Do not classify that bounded cleanup wait as an
+# unconfirmed operation before the relay itself has had time to observe it.
+RELAY_SHUTDOWN_TIMEOUT = TIMEOUT + 1
 RELAY_BUFFER = 64 * 1024
 SSH_USER = re.compile(r'^[A-Za-z_][A-Za-z0-9_-]{0,31}$')
 SSH_HOST = re.compile(
@@ -133,7 +137,10 @@ def fixed_ssh_config(target=None):
             '  BatchMode yes\n'
             '  PasswordAuthentication no\n'
             '  KbdInteractiveAuthentication no\n'
-            '  IdentitiesOnly yes\n'
+            # IdentityFile none prevents private-key file discovery.  The
+            # dedicated Agent is the only remaining source of identities, so
+            # it must not be excluded by IdentitiesOnly=yes.
+            '  IdentitiesOnly no\n'
             '  IdentityFile none\n'
             '  IdentityAgent /run/focodex/agent.sock\n'
             '  ForwardAgent no\n'
@@ -165,6 +172,8 @@ class FixedTargetProxy:
         os.chmod(self.socket_path, 0o600)
         self._listener.listen(1)
         self._closed = False
+        self.accepted = False
+        self.connected = False
 
     def close(self):
         if self._closed:
@@ -186,10 +195,12 @@ class FixedTargetProxy:
         self._listener.settimeout(timeout)
         try:
             client, _ = self._listener.accept()
+            self.accepted = True
         except TimeoutError as error:
             raise TimeoutError('Sandboxからの中継接続が時間切れです。') from error
         try:
             with socket.create_connection((self.host, self.port), timeout=timeout) as remote:
+                self.connected = True
                 client.settimeout(timeout)
                 remote.settimeout(timeout)
                 self._relay(client, remote)
@@ -250,6 +261,11 @@ def relay_arguments(project):
             '--setenv', 'PATH', '/usr/bin:/bin', '--chdir', '/work']
 
 
+def minimal_passwd():
+    """Supply only the invoking uid's synthetic passwd entry to SSH."""
+    return f'focodex:x:{os.geteuid()}:{os.getegid()}:Focodex:/nonexistent:/sbin/nologin\n'.encode()
+
+
 def sandbox_probe(project):
     agent = os.environ.get('SSH_AUTH_SOCK')
     if not agent:
@@ -306,7 +322,7 @@ def relay_probe(project):
         except subprocess.TimeoutExpired as error:
             os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=3)
             raise git_ops.UncertainGit('中継試験が時間切れです。') from error
-        echo_thread.join(3); relay_thread.join(3)
+        echo_thread.join(RELAY_SHUTDOWN_TIMEOUT); relay_thread.join(RELAY_SHUTDOWN_TIMEOUT)
         if echo_thread.is_alive() or relay_thread.is_alive():
             raise git_ops.UncertainGit('中継試験の終了確認に失敗しました。')
         if process.returncode or errors:
@@ -324,31 +340,64 @@ def readonly_ssh_probe(project):
     known = known_host_entries(known_host_name(target), Path.home() / '.ssh/known_hosts')
     with tempfile.TemporaryDirectory(prefix='focodex-ssh-') as directory:
         base = Path(directory); os.chmod(base, 0o700)
-        known_file, config_file, proxy_file = base / 'known_hosts', base / 'ssh_config', base / 'ssh_proxy.py'
+        known_file, config_file, proxy_file, passwd_file = (base / 'known_hosts', base / 'ssh_config',
+                                                              base / 'ssh_proxy.py', base / 'passwd')
         known_file.write_bytes(known); config_file.write_bytes(fixed_ssh_config(target))
         proxy_file.write_text('import os,select,socket,sys\ns=socket.socket(socket.AF_UNIX);s.connect(sys.argv[1])\nwhile True:\n r,_,_=select.select([0,s],[],[])\n if 0 in r:\n  d=os.read(0,65536)\n  if not d:s.shutdown(socket.SHUT_WR)\n  else:s.sendall(d)\n if s in r:\n  d=s.recv(65536)\n  if not d:break\n  os.write(1,d)\n')
-        for path in (known_file, config_file, proxy_file): os.chmod(path, 0o600)
+        passwd_file.write_bytes(minimal_passwd())
+        for path in (known_file, config_file, proxy_file, passwd_file): os.chmod(path, 0o600)
         with FixedTargetProxy(target.host, target.port) as proxy:
             errors = []
             thread = threading.Thread(target=lambda: _relay_once(proxy, errors), daemon=True); thread.start()
             command = relay_arguments(project) + ['--bind', str(proxy.socket_path), '/run/focodex/transport.sock',
                 '--bind', str(agent), '/run/focodex/agent.sock', '--ro-bind', str(known_file), '/run/focodex/known_hosts',
                 '--ro-bind', str(config_file), '/run/focodex/ssh_config', '--ro-bind', str(proxy_file), '/run/focodex/ssh_proxy.py',
+                '--dir', '/etc', '--ro-bind', str(passwd_file), '/etc/passwd',
                 '--setenv', 'SSH_AUTH_SOCK', '/run/focodex/agent.sock', '--setenv', 'GIT_SSH_COMMAND', '/usr/bin/ssh -F /run/focodex/ssh_config',
                 '--setenv', 'GIT_CONFIG_NOSYSTEM', '1', '--setenv', 'GIT_CONFIG_GLOBAL', '/dev/null', '--setenv', 'GIT_TERMINAL_PROMPT', '0',
                 '/usr/bin/git', '-C', '/work', 'ls-remote', '--exit-code', remote, merge]
-            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True, env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent', 'LC_ALL': 'C.UTF-8'})
-            try: process.wait(timeout=TIMEOUT)
-            except subprocess.TimeoutExpired as error:
-                os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=3)
-                raise git_ops.UncertainGit('読み取り専用SSH接続試験が時間切れです。') from error
-            thread.join(3)
+            # Keep diagnostics private, then expose only a fixed failure class.
+            # In particular, never return an SSH URL, host key, user name, or
+            # command output to the extension.
+            with tempfile.TemporaryFile() as stderr:
+                process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr,
+                    start_new_session=True, env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent', 'LC_ALL': 'C.UTF-8'})
+                try: process.wait(timeout=TIMEOUT)
+                except subprocess.TimeoutExpired as error:
+                    os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=3)
+                    raise git_ops.UncertainGit('読み取り専用SSH接続試験が時間切れです。') from error
+                stderr.seek(0)
+                diagnostic = stderr.read(4096)
+            # The relay's accept/select timeout is TIMEOUT.  A shorter join
+            # here created a false "unconfirmed" result on a real SSH exit,
+            # even though the bounded relay cleanup completed moments later.
+            thread.join(RELAY_SHUTDOWN_TIMEOUT)
             if thread.is_alive(): raise git_ops.UncertainGit('SSH中継の終了確認に失敗しました。')
-            if process.returncode or errors: raise ValueError('読み取り専用SSH接続試験に失敗しました。')
+            if process.returncode or errors:
+                raise ValueError(ssh_probe_failure_reason(proxy, errors, diagnostic, process.returncode))
     return {'ssh': 'passed', 'readOnly': True, 'networkShared': False}
 
 
 def _relay_once(proxy, errors):
     try: proxy.serve_once()
     except Exception as error: errors.append(error)
+
+
+def ssh_probe_failure_reason(proxy, errors, diagnostic, returncode=None):
+    """Return a fixed, non-secret category for an SSH probe failure."""
+    text = diagnostic.lower()
+    if not proxy.accepted:
+        return '読み取り専用SSH接続試験に失敗しました: Sandbox内SSHが中継へ接続できませんでした。'
+    if not proxy.connected:
+        return '読み取り専用SSH接続試験に失敗しました: 固定宛先への接続に失敗しました。'
+    if b'host key verification failed' in text:
+        return '読み取り専用SSH接続試験に失敗しました: 接続先のホスト鍵を確認できませんでした。'
+    if any(marker in text for marker in (b'permission denied', b'no identities', b'agent refused operation')):
+        return '読み取り専用SSH接続試験に失敗しました: 専用Agentによる認証に失敗しました。'
+    if errors:
+        return '読み取り専用SSH接続試験に失敗しました: SSH中継通信に失敗しました。'
+    # git ls-remote --exit-code returns 2, with no diagnostic, if the pinned
+    # ref does not exist.  Authentication and transport have already worked.
+    if returncode == 2:
+        return '読み取り専用SSH接続試験に失敗しました: upstreamブランチをリモートに確認できませんでした。'
+    return '読み取り専用SSH接続試験に失敗しました: Sandbox内のGitまたはSSHが失敗しました。'

@@ -243,6 +243,28 @@ class GitTests(unittest.TestCase):
         self.assertNotIn('SSH_AUTH_SOCK', args)
         self.assertNotIn('/run/focodex/agent.sock', args)
 
+    def test_minimal_passwd_exposes_only_a_synthetic_current_user(self):
+        self.assertEqual(git_remote.minimal_passwd(),
+                         f'focodex:x:{os.geteuid()}:{os.getegid()}:Focodex:/nonexistent:/sbin/nologin\n'.encode())
+
+    def test_relay_shutdown_wait_covers_its_bounded_io_timeout(self):
+        self.assertGreater(git_remote.RELAY_SHUTDOWN_TIMEOUT, git_remote.TIMEOUT)
+
+    def test_ssh_probe_failure_reason_does_not_expose_endpoint_details(self):
+        proxy = mock.MagicMock(accepted=True, connected=True)
+        self.assertIn('ホスト鍵', git_remote.ssh_probe_failure_reason(
+            proxy, [], b'Host key verification failed for github.example'))
+        self.assertIn('専用Agent', git_remote.ssh_probe_failure_reason(
+            proxy, [], b'git@github.example: Permission denied (publickey)'))
+        self.assertNotIn('github.example', git_remote.ssh_probe_failure_reason(
+            proxy, [], b'git@github.example: Permission denied (publickey)'))
+        proxy.accepted = False
+        self.assertIn('中継へ接続', git_remote.ssh_probe_failure_reason(proxy, [], b''))
+        proxy.accepted = True
+        self.assertIn('upstreamブランチ', git_remote.ssh_probe_failure_reason(proxy, [], b'', 2))
+        self.assertIn('upstreamブランチ', git_remote.ssh_probe_failure_reason(
+            proxy, [], b'Warning: Identity file none not accessible', 2))
+
     def test_known_host_entries_returns_only_matching_key_rows(self):
         known = self.root / 'known_hosts'; known.write_text('placeholder\n')
         completed = subprocess.CompletedProcess([], 0, b'# Host example found\nexample ssh-ed25519 key\n')
@@ -265,7 +287,7 @@ class GitTests(unittest.TestCase):
         config = git_remote.fixed_ssh_config(target).decode()
         for line in ('StrictHostKeyChecking yes', 'UpdateHostKeys no', 'BatchMode yes',
                      'PasswordAuthentication no', 'KbdInteractiveAuthentication no',
-                     'IdentitiesOnly yes', 'IdentityFile none', 'GlobalKnownHostsFile /dev/null'):
+                     'IdentitiesOnly no', 'IdentityFile none', 'GlobalKnownHostsFile /dev/null'):
             self.assertIn(line, config)
         self.assertIn('Host example.test', config)
         self.assertIn('Port 2222', config)
