@@ -123,6 +123,31 @@ def dedicated_agent_socket():
     return path
 
 
+def dedicated_agent_status():
+    """Return a non-secret availability class for the dedicated remote Agent.
+
+    This contacts only the explicitly configured local Unix socket; it does
+    not resolve a host, open a TCP connection, or disclose a key fingerprint.
+    """
+    if not os.environ.get('FOCODEX_REMOTE_AGENT'):
+        return 'notConfigured'
+    try:
+        agent = dedicated_agent_socket()
+    except ValueError:
+        return 'unavailable'
+    if not Path('/usr/bin/ssh-add').is_file():
+        return 'unavailable'
+    try:
+        result = subprocess.run(['/usr/bin/ssh-add', '-l'], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                timeout=TIMEOUT, check=False,
+                                env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent',
+                                     'SSH_AUTH_SOCK': str(agent), 'LC_ALL': 'C.UTF-8'})
+    except (OSError, subprocess.SubprocessError):
+        return 'unavailable'
+    return 'ready' if result.returncode == 0 else 'noKeys' if result.returncode == 1 else 'unavailable'
+
+
 def fixed_ssh_config(target=None):
     """Fixed SSH options with no inherited config or client-selected relay."""
     host = 'focodex-remote' if target is None else target.host

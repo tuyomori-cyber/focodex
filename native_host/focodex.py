@@ -149,6 +149,7 @@ def git_remote_preflight(project):
     except OSError:
         agent_available = False
     return {'branch': ref, 'upstream': upstream, 'sshAgentAvailable': agent_available,
+            'remoteAgentStatus': git_remote.dedicated_agent_status(),
             'bwrapAvailable': Path('/usr/bin/bwrap').is_file(),
             'gitAvailable': Path(git_ops.GIT).is_file(), 'sshAvailable': Path('/usr/bin/ssh').is_file()}
 

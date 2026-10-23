@@ -1,114 +1,93 @@
-# Focodex Pull・Push 実装設計案
+# Focodex Pull・Push 実装設計
 
-作成日: 2026-10-23  
-状態: 設計案（通信境界の方式を調査中。実装・実機検証前）
+更新日: 2026-10-23
+状態: 第3段階の安全契約を確定。Fetch／Pull／Pushは未実装・未実行。
 
 ## 1. 目的と範囲
 
-Surface Pro 4のFirefox/Cage環境で、タッチ操作から日常的なGit同期を実行する。Focodexを汎用Gitクライアントにはせず、正常に設定済みのローカルリポジトリについて、現在チェックアウト中のブランチをPull・Pushする機能だけを提供する。
+Surface Pro 4 の Firefox/Cage 環境から、日常的な同期を限定的に行う。Focodex は汎用 Git クライアントではない。正常に設定済みの1リポジトリについて、現在チェックアウト中のブランチの Fast-forward Pull と通常 Push だけを、条件を満たす場合に明示操作で実行する。
 
-**対象:** 現在のブランチのPull、Push、状態表示、エラー表示。  
-**対象外:** ブランチ作成・切替、upstream設定、SSH鍵生成・登録、認証設定、競合解決、rebase、force push、任意のリモート/ブランチ指定、Git設定修復。対象外の操作はSSH経由のGit CLI等で行う。
+**対象:** 現在ブランチの状態表示、Fast-forward Pull、単一追跡ブランチへの通常 Push、操作結果と安全な復旧案内。
+**対象外:** ブランチ作成・切替、upstream 作成・変更、SSH 鍵生成・登録、認証設定、競合解決、merge、rebase、cherry-pick、force push、削除 push、タグ一括送信、任意 remote/refspec、Git 設定の修復、異常終了からの自動復旧。
 
-## 2. 既存機能との責務分離
+複雑な操作は Focodex 外の Git CLI で行う。第3段階の完了後も、Git 機能を汎用操作へ拡張しないことを原則とする。
 
-- **ローカルGit操作:** Stage・Unstage・Commitは既存の厳格な検証方式を維持する。既存の`git_ops.py`の安全境界をPull・Push導入のために緩めない。
-- **リモートGit操作:** Pull・Pushは別モジュール（仮称`git_remote.py`）に分離し、固定されたGit CLIコマンドを専用Sandboxで実行する。
-- **Native Host:** 登録済みプロジェクトの特定、要求の検証、Codex/Git操作との排他、実行状態の管理、結果の返却を担う。
-- **UI:** 現在のブランチ・追跡先・同期結果を表示し、Pull/Pushボタンを提供する。Gitコマンドや引数の自由入力欄は設けない。
+## 2. 責務と不変条件
 
-## 3. 追跡先の扱い
+- Stage と Commit は既存の `git_ops.py` の安全境界を維持する。Pull・Push のために既存の検査を緩めない。ステージ済み変更の解除は引き続き未提供である。
+- Pull・Push は `git_remote.py` に分離し、Host が構築した固定引数配列だけを専用 Sandbox で実行する。UI には Git コマンド・URL・refspec の自由入力欄を置かない。
+- Codex 実行、ローカル Git 操作、リモート Git 操作は同じ排他と永続実行記録を共有する。外部端末からの変更を完全には防げないため、検証は実行直前にも繰り返す。
+- Git hooks、filter、external diff、fsmonitor、credential helper、署名、include、remote helper、環境変数など、Git が間接的に起動・参照できるものを信頼しない。許可規則で検証できない構成は拒否し、設定を自動修復しない。
 
-現在の**ローカルブランチ**に設定されたupstreamを、操作時にローカルGit設定から取得する。Focodex固有の「固定ブランチ」設定は持たない。ブランチをCLIで切り替えた場合、次回操作では切替後のブランチとupstreamを使用する。
+## 3. 対象の確定と通信境界
 
-- upstream未設定・detached HEAD・対象が曖昧な場合は拒否。
-- Push先はupstreamと同じリモート・ブランチを明示して実行する。`push.default`等の暗黙のPush先決定には依存しない。
-- 操作直前にブランチ名・upstream・リモートURLを再検証し、事前確認後に変化した場合は中止する。
-- リモートやブランチの追加・変更はCLIで行う。
+操作ごとに現在のローカルブランチから単一 upstream を取得する。detached HEAD、upstream 未設定、複数値、許可外の remote 名・merge ref・URL、`pushurl` の設定は拒否する。事前表示、最終確認、実行直前の3時点で、ブランチ・upstream・remote URL を再検証し、いずれかが変化すれば中止する。
 
-## 4. Pullの動作（Fast-forward限定）
+許可する URL は明示的な `ssh://user@host[:port]/path` のみとする。scp 形式、暗黙ユーザー、IP リテラル、query/fragment、複数 URL、別 remote、SSH 設定の継承、ProxyJump、ProxyCommand は拒否する。Host は検証済みの host・port・user・repository path だけへ接続する一操作限りの Unix ソケット中継を作る。Sandbox はホストのネットワーク名前空間を共有せず、この中継以外へ接続できない。
 
-1. Native Hostが対象リポジトリの登録状態と排他状態を確認する。
-2. 現在のブランチ、upstream、リモートを確認する。
-3. 作業ツリーとインデックスがクリーンであることを確認する。進行中のmerge/rebase等があれば拒否する。
-4. 専用Sandbox内で、指定されたupstreamの取得に必要な`git fetch`を実行する。
-5. 取得したコミットが現在のHEADの子孫か検証する。ローカルが先行・分岐している場合の扱いは「更新不要」または「拒否」とし、自動マージ・rebaseは行わない。
-6. Fast-forward可能な場合だけ`git merge --ff-only`相当で更新する。
-7. 結果のブランチ、HEAD、作業ツリー状態を再確認し、成功・更新不要・拒否・失敗を区別して表示する。
+Sandbox 内 SSH は Host が生成する最小設定だけを使う。既知鍵は対象 host のものだけ、`StrictHostKeyChecking=yes`、対話認証なし、鍵ファイル探索なし、Agent forwarding なし、ControlMaster なしとする。認証には `FOCODEX_REMOTE_AGENT` で明示された、Host 実行ユーザー所有かつ group/other 非公開の専用 Agent ソケットだけを使い、通常の `SSH_AUTH_SOCK` は流用しない。
 
-**重要:** Fetchはリモート追跡参照を更新し、Fast-forwardは作業ツリーを書き換える。Sandboxだけで更新の妥当性は保証されない。実行前後の状態検証と、操作中の排他が必要。
+## 4. Pull の安全契約
 
-## 5. Pushの動作（非強制・単純同期限定）
+Pull は次のすべてを満たす場合だけ開始する。
 
-1. Native Hostが対象リポジトリ、排他、現在のブランチ、upstreamを検証する。
-2. Push先のリモート・ブランチをupstreamから明示的に確定する。
-3. Force、削除、タグ一括送信、任意refspecを許可しない。
-4. Sandbox内で固定コマンドにより通常Pushを実行する。リモート側が進んでいて非Fast-forwardになる場合はGitに拒否させる。
-5. 成功・更新不要・拒否・認証失敗・通信失敗を区別して表示する。
+1. 対象リポジトリ、現在ブランチ、単一 upstream、固定通信先が一意に検証できる。
+2. HEAD が attached である。
+3. ステージ済み・未ステージ・未追跡の変更がない。初期実装では未追跡ファイルが1件でもあれば拒否する。
+4. merge、rebase、cherry-pick、revert、bisect 等の進行状態、ロック、既存の実行未確認記録がない。
+5. 設定・属性・管理ディレクトリ・worktree 構成が既存の許可規則を満たす。
 
-**注意:** 非強制Pushでも、送信前の状態とリモートの状態には競合があり得る。成功判定はGitの実行結果に基づく。認証の再設定や競合解決は自動で行わない。
+実装は次の順で進める。
 
-## 6. Sandboxの基本要件
+1. 上記の読み取り専用検証と、最終確認で表示する現在 HEAD・branch・upstream を取得する。
+2. 固定通信境界を使う Fetch を単独機能として先に検証する。Fetch は remote-tracking ref を更新する変更操作であり、読み取り専用 SSH 試験の成功から安全とは推定しない。
+3. Fetch 後、実行直前にローカル HEAD と upstream の取得先を再確認する。upstream の取得コミットが現在 HEAD の子孫である場合だけ進める。ローカル先行、分岐、判定不能の場合は作業ツリーを変更せず停止する。
+4. 固定引数による `merge --ff-only` 相当を実行する。自動 merge、rebase、競合解決はしない。
+5. 正常終了時は branch、HEAD、index、作業ツリーを再確認する。
 
-- LinuxのOSレベルの隔離（候補: bubblewrap）を検討する。既存のCodex用制限設定をそのまま転用できるとは仮定しない。
-- 登録済みの対象リポジトリ以外のファイルシステムアクセスを原則禁止する。必要なGit実行ファイル・ライブラリ等は読み取り専用で提供する。
-- Git hooks、外部filter、credential helper、SSHコマンド、Git config、環境変数等を含め、**Gitが間接的に起動するプログラム**を脅威モデルに含める。
-- Pull時のファイル書き換え、`.git`の参照・オブジェクト更新に必要な書込範囲を定義する。Gitが想定外の場所に書き込めないことを検証する。
-- Pushは通信が必要。認証と通信のために開ける境界を最小化する。ネットワーク宛先の制御をSandbox単体で実現できるとは仮定しない。
-- SSH秘密鍵をSandboxに直接渡すことを既定にしない。SSH Agentソケットを渡す場合も鍵の利用範囲は自動的には制限されない。
-- 失敗時は権限を広げず中止する（fail closed）。
+結果は「更新成功」「更新不要」「開始前拒否」「Git が明確に失敗」「結果未確認」を区別する。明確な失敗でも状態を再取得するが、状態が確認できなければ結果未確認として扱う。
 
-## 7. 排他・異常終了・結果表示
+## 5. Push の安全契約
 
-- Codex実行中、ローカルGit変更操作中、他のリモートGit操作中はPull/Pushを開始しない。
-- Native Hostが既存の実行状態記録と終了確認の仕組みを再利用する。Gitの子プロセス・SSH等の子孫プロセスも終了確認の対象にする。
-- タイムアウト・中断・終了未確認時は、処理が成功したと推測しない。状態を「不明」として追加変更操作を止め、CLIによる確認・復旧へ誘導する。
-- 操作失敗後に自動で別の認証方法を試したり、設定を書き換えたりしない。
-- UIには現在のローカルブランチ、upstream、Pull/Push結果、必要なCLI復旧案内を表示する。
+Push は現在ブランチの検証済み upstream にだけ送る。`push.default`、`remote.pushDefault`、暗黙の push 先決定は使わない。送信コマンドは、直前に再検証した値から構築する明示 refspec（概念例: `refs/heads/main:refs/heads/main`）だけとする。force、`--force-with-lease`、削除 refspec、タグ一括送信、任意 refspec は許可しない。
 
-## 8. 初期対応の制限
+実行前に固定通信境界で対象 remote branch の OID を確認し、その OID がローカル HEAD の祖先であることを確認する。これは開始前の安全診断であり、確認後の別端末による更新との競合を排除する保証ではない。実際の送信先との一致は、同一の検証済み upstream スナップショットから Host が refspec と固定中継先を生成し、実行直前に再検証することで担保する。
 
-- リモート分岐の自動解消なし。
-- 複数リモートの選択UIなし。
-- upstreamの作成・変更UIなし。
-- 認証情報の入力・保存UIなし。
-- ブランチ切替UIなし。SSHで`git switch`した後にFocodexを使用する。
-- Gitの特殊な構成や未検証の認証方式はサポート対象外とし、検証できない場合は拒否する。
+通常 Push の non-fast-forward 拒否を最終的な競合防止に使う。確認後に remote が進んだ場合、Git の通常 Push が拒否したら停止し、自動 Pull・rebase・再 Push を行わない。`--force-with-lease` は採用しない。
 
-## 9. 実装順序（案）
+Push 前にも Pull と同じリポジトリ状態・進行状態・設定検証を行う。正常終了後は、固定経路で対象 remote branch を再確認し、期待した送信先と commit OID を確認する。ローカル HEAD が不変でも remote 側の更新は成立し得るため、再確認できなければ「Push結果未確認」であり「Push失敗」ではない。
 
-1. 別紙「事前調査・検証事項」を実施し、Sandboxと認証経路の成立性を確認する。
-2. 既存のローカルGit操作の安全性・排他を維持できるインターフェースを定義する。
-3. 読み取り専用の現在ブランチ・upstream表示を実装する。
-4. Sandbox内のFetchを単独で検証する。
-5. Fast-forward限定Pullを実装する。
-6. 通常Pushを実装する。
-7. Surface実機でSSH/Firefox Native Host経由の動作、失敗・中断・復旧を確認する。
+## 6. 正常・失敗・結果未確認
 
-## 10. 未確定事項
+| 状態 | Pull | Push | Focodex の動作 |
+| --- | --- | --- | --- |
+| 正常終了 | HEAD・index・作業ツリーを再確認 | 対象 remote branch を再確認 | 成功または更新不要を表示 |
+| 明確な失敗 | ローカル状態を再確認 | remote 状態を再確認 | 失敗理由を固定分類で表示。自動再実行なし |
+| タイムアウト・中断・終了未確認 | 成否を推定しない | remote 更新済みの可能性を含め成否を推定しない | 結果未確認として変更操作を停止 |
+| 復旧 | Focodex 外の CLI で状態確認 | Focodex 外の CLI で remote を確認 | 確認後にのみ運用を再開 |
 
-- Sandbox実装方式と起動権限。
-- SSH鍵/Agent/known_hostsの安全な受け渡し方法。
-- Git設定、hooks、filters、補助プログラムの具体的な遮断方法。
-- リモートURL・認証方式の許容範囲。
-- Fetch後のupstream参照更新とFast-forward適用の原子的な扱い。
-- 実装時に使用するGitコマンドと固定環境変数の詳細。
+Host の子プロセス・SSH・中継の終了確認ができない場合、永続実行記録を残す。Firefox・Host の再起動、PID 不在、通信切断だけでは解除しない。結果未確認時の自動再 Pull／再 Push、設定変更、別認証方式の試行はしない。
 
-## 11. 通信境界の調査結果と候補方式（2026-10-23）
+## 7. Focodex が保証する範囲
 
-SurfaceのSELinux `Enforcing` 環境では、ネットワークを共有しないbubblewrap Sandboxに、対象リポジトリを読取り専用、SSH Agentソケットだけを固定パスへbindして、Firefox Native Hostから起動できることを実機確認した。この時点でSSH接続・Fetch・Pushは実行していない。
+Focodex は、許可された固定操作だけを実行し、操作対象を明示的に確定し、危険・未検証の状態では開始せず、結果不明時に勝手に再実行しないことを保証目標とする。
 
-`bwrap --share-net`は、Sandboxにホストのネットワーク名前空間を戻す指定であり、宛先単位の制限ではない。そのため、本機能の通信許可に追加しない。bubblewrap公式資料でも、`--unshare-all`はネットワーク名前空間を分離し、`--share-net`はそれを保持する指定とされている。[bubblewrap manual](https://github.com/containers/bubblewrap/blob/main/bwrap.xml)
+競合解決、外部からの同時変更の完全防止、不正・特殊なリポジトリ設定の自動修復、異常終了後の自動復旧は保証しない。
 
-現時点の候補方式は次のとおりである。
+## 8. 検証状況と実装順序
 
-1. Hostが操作直前に現在branchの単一upstreamを再検証し、明示的な`ssh://user@host[:port]/path`だけを許可してhost・port・ユーザー名・refを固定する。scp形式、暗黙ユーザー、IPリテラル、query/fragment、複数URL、`pushurl`、任意URL、別remote、ProxyJump、ProxyCommand、include、SSH設定の継承は拒否する。
-2. Hostが固定済みのhost/portだけへ接続する、一操作限り・一接続だけのUnixソケット中継を作る。Sandboxはネットワーク名前空間を共有せず、この固定ソケットへしか接続できない。
-3. Sandbox内のSSHは、Hostが生成した最小の設定だけを使う。ホスト鍵は対象hostの明示的な既知鍵だけを読取り専用で与え、`StrictHostKeyChecking=yes`、既知鍵の自動追加・更新なし、対話認証なし、鍵ファイル探索なしとする。OpenSSHでは`UserKnownHostsFile`と`StrictHostKeyChecking=yes`で専用の既知鍵ファイルと未知・変更鍵の拒否を指定できる。[ssh_config(5)](https://man.openbsd.org/ssh_config)
-4. Agentは共有状態のまま渡さない。Hostは`SSH_AUTH_SOCK`をリモート操作へ流用せず、`FOCODEX_REMOTE_AGENT`で明示された、Host実行ユーザー所有かつgroup/other非公開の専用Unixソケットだけを候補にする。専用Agentには対象鍵だけを読み込み、利用可能なら対象hostのホスト鍵に紐付くdestination constraintを設定する。OpenSSHの`ssh-add -h`は鍵を特定宛先だけに制限できるが、対応するAgent・SSHクライアントと既知のホスト鍵が必要である。[ssh-add(1)](https://man7.org/linux/man-pages/man1/ssh-add.1.html)
+| 検証項目 | 状態 |
+| --- | --- |
+| 固定宛先 SSH | 成功 |
+| 専用 SSH Agent | 成功 |
+| 最小 known_hosts | 成功 |
+| 中継経由の接続 | 成功 |
+| 実 upstream への `ls-remote` | 成功 |
+| Fetch | 未確認 |
+| Fast-forward Pull | 未確認 |
+| Push | 未確認 |
+| 異常終了・復旧 | 未確認 |
 
-この候補はまだ採用決定ではない。特に、Host側中継の接続先固定、DNSとSSHホスト鍵の扱い、専用Agentを作る運用、Sandbox内SSHへの固定ソケット接続の渡し方を、小さな読み取り専用試験で確認する必要がある。既存の共有Agentを直接Sandboxへ渡しただけで、鍵や宛先が制限されたとは扱わない。
+読み取り専用 SSH 経路は実機で成立している。ただし、これは Fetch・Pull・Push、または変更操作の後処理の安全性を実証するものではない。
 
-実施済みの段階的確認として、通信なしSandbox、Host固定ループバック中継、専用AgentのNative Host継承、対象ホストの既知鍵存在、SSH URLの許可形式への限定を確認した。リモート接続用の固定SSH設定と、明示的な専用Agentソケットの検証も実装済みである。未実施なのは、厳格に解析した実upstreamへのSSH接続、Fetch、Pull、Pushである。次のSSH接続試験では、既知鍵抽出・固定SSH設定・Agent・中継のすべてを一操作内で生成・破棄する必要がある。
-
-※本書は会話で合意した運用方針を整理した設計案であり、Sandboxの安全性や実装可能性を検証済みとするものではない。
+実装は、(1) 現在 branch/upstream と専用 Agent の読み取り専用診断表示の改善、(2) 固定通信境界内の Fetch 単独検証、(3) Fast-forward Pull、(4) 通常 Push、(5) Surface 実機で成功・拒否・中断・結果未確認・CLI 復旧を確認、の順とする。各段階で自動試験と実機確認を完了するまで次へ進まない。

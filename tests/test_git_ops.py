@@ -200,6 +200,7 @@ class GitTests(unittest.TestCase):
         self.assertEqual(result['branch'], 'refs/heads/main')
         self.assertEqual(result['upstream'], 'origin/main')
         self.assertIsInstance(result['sshAgentAvailable'], bool)
+        self.assertEqual(result['remoteAgentStatus'], 'notConfigured')
         self.assertNotIn('url', result)
         self.assertFalse(self.config.with_suffix('.execution.json').exists())
 
@@ -281,6 +282,15 @@ class GitTests(unittest.TestCase):
         agent = self.root / 'agent.sock'; agent.write_bytes(b'not a socket')
         with mock.patch.dict(os.environ, {'FOCODEX_REMOTE_AGENT': str(agent)}):
             with self.assertRaises(ValueError): git_remote.dedicated_agent_socket()
+
+    def test_dedicated_agent_status_never_discloses_key_material(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(git_remote.dedicated_agent_status(), 'notConfigured')
+        with mock.patch.dict(os.environ, {'FOCODEX_REMOTE_AGENT': str(self.root / 'missing.sock')}):
+            self.assertEqual(git_remote.dedicated_agent_status(), 'unavailable')
+        agent = self.root / 'agent.sock'; agent.write_bytes(b'not a socket')
+        with mock.patch.dict(os.environ, {'FOCODEX_REMOTE_AGENT': str(agent)}):
+            self.assertEqual(git_remote.dedicated_agent_status(), 'unavailable')
 
     def test_fixed_ssh_config_disables_inherited_authentication_paths(self):
         target = git_remote.SshRemote('git', 'example.test', 2222, '/team/repository.git')

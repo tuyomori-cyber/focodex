@@ -344,3 +344,15 @@ Surfaceでは専用AgentへGitHub用鍵をdestination constraint付きで登録�
 その後、Host再登録・拡張再読み込みの過程で前回Codexの専用プロセス群の終了を確認できない永続記録が残った。Focodexは意図どおりCodex・Git操作・設定変更を拒否し、画面にOS再起動後の再接続と実行記録を削除しない旨を表示した。
 
 OS再起動後の再試験では、専用Agentのソケット確認、中継終了待機、Sandbox内のUID解決、Agent鍵の選択を順に修正した。`git-test` の`origin`を実在する明示的な`ssh://` URLへ設定後、Firefoxの「読み取り専用SSH接続試験」で「upstreamを確認しました」と表示された。固定宛先・専用Agent・最小known_hosts・中継を通る`git ls-remote --exit-code`だけが実行され、Fetch、Pull、Push、作業ツリー・参照の変更は行っていない。自動試験は64件成功した。
+
+## 第3段階の専用Agent事前診断（2026-10-23）
+
+リモート事前診断を更新し、通常の SSH_AUTH_SOCK と、FOCODEX_REMOTE_AGENT で明示されたFocodex専用Agentを別々に表示するようにした。専用Agentは本人所有かつgroup/other非公開のUnixソケットであることを検証後、ローカルの ssh-add -l で「鍵あり」「鍵なし」「利用不可」「未設定」だけを判定する。鍵の指紋、接続先、URL、ssh-addの出力はHost・画面のいずれにも返さない。この診断はネットワーク通信、Git操作、リポジトリ変更を行わない。
+
+python3 -m unittest discover -s tests -v は65件成功し、画面ロジック・受信バッファ試験・JavaScript構文検査・git diff --checkも成功した。Firefox実機での更新Host再登録と診断表示の確認は次のFetch単独検証より前に行う。
+
+## ログイン連動の専用SSH Agentに向けた前提確認（2026-10-23）
+
+SurfaceのLightDM PAM設定には pam_gnome_keyring.so と auto_start が設定されていた。現在のユーザーセッションではGNOME KeyringのSecret ServiceへD-Bus Pingが成功し、login aliasを取得でき、当該collectionが未ロックであることを確認した。これは鍵・パスフレーズ・Secret Serviceの項目内容を読まないメタデータ確認だけである。
+
+実Codex App ServerにFocodexと同等のpermission profileを渡し、ユーザーruntimeディレクトリに一時作成したmode 0600のUnixソケットをSandbox内から存在確認できないことを検証した。Secret Serviceと実Agentには接続していない。workspace権限検証は、許可済み2ルートの読み書き、未登録ルートとそのリンク経由の読書き拒否、runtimeソケットの非可視をすべて成功した。
