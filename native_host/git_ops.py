@@ -329,19 +329,36 @@ class Repository:
             if version not in (2, 3):
                 raise ValueError('初版はindex v2/v3だけに対応します。')
             hash_size = 32 if ('extensions.objectformat', 'sha256') in self.settings else 20
+            content_end = len(data) - hash_size
+            if content_end < 12:
+                raise ValueError('インデックス構造を確認できません。')
             offset = 12
             for _ in range(count):
                 start = offset
-                flags = struct.unpack('>H', data[offset + 40 + hash_size:offset + 42 + hash_size])[0]
-                offset += 42 + hash_size + (2 if flags & 0x4000 else 0)
-                offset = data.index(b'\0', offset) + 1
+                fixed_end = offset + 42 + hash_size
+                if fixed_end > content_end:
+                    raise ValueError('インデックス構造を確認できません。')
+                flags = struct.unpack('>H', data[offset + 40 + hash_size:fixed_end])[0]
+                offset = fixed_end + (2 if flags & 0x4000 else 0)
+                if offset > content_end:
+                    raise ValueError('インデックス構造を確認できません。')
+                try:
+                    offset = data.index(b'\0', offset, content_end) + 1
+                except ValueError as error:
+                    raise ValueError('インデックス構造を確認できません。') from error
                 offset = start + ((offset - start + 7) // 8 * 8)
-            while offset < len(data) - hash_size:
+                if offset > content_end:
+                    raise ValueError('インデックス構造を確認できません。')
+            while offset < content_end:
+                if offset + 8 > content_end:
+                    raise ValueError('インデックス構造を確認できません。')
                 signature, length = struct.unpack('>4sI', data[offset:offset + 8])
                 if signature in (b'link', b'sdir'):
                     raise ValueError('split/sparse indexは初版で扱えません。')
                 offset += 8 + length
-            if offset != len(data) - hash_size:
+                if offset > content_end:
+                    raise ValueError('インデックス構造を確認できません。')
+            if offset != content_end:
                 raise ValueError('インデックス構造を確認できません。')
         for mode, oid, stage, name in self.entries():
             if mode not in ('100644', '100755') or stage != '0':

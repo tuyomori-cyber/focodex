@@ -310,4 +310,35 @@ Git用の起動前永続記録と共有ロックを追加。設定・属性・�
 - ref更新後の結果検証失敗でも成功を返さず、永続記録を残すことを確認。
 - Gitの時間切れ・出力超過・シグナル終了・プロセス群の終了確認例外を未確認として扱うこと、CodexとGitの共通排他を確認。
 
-Hostインストーラーは`git_ops.py`もコピーするよう更新し、一時ホームでモジュールが配置されることを検査した。このターンでは登録済みの実ホームのHostを更新していない。更新後のFirefox画面・実拡張間配送・Split View・Surfaceタッチ・実際のOS再起動による復旧は未確認。試験用リポジトリだけを変更し、実Focodexのインデックス・Commit履歴・リモートは変更していない。
+この時点ではHostインストーラーを`git_ops.py`もコピーするよう更新し、一時ホームでモジュールが配置されることを検査した。現在は`git_remote.py`も同様にコピーする。更新後のFirefox画面での第2段階の通常操作は後続の記録で確認済みである。実拡張間配送・Split View・Surfaceタッチ・実際のOS再起動による復旧は未確認。試験用リポジトリだけを変更し、実Focodexのインデックス・Commit履歴・リモートは変更していない。
+
+## Git第2段階のFirefox正常系確認と表示再取得失敗の復旧（2026-10-23）
+
+更新Hostを再登録し、Firefox拡張と操作タブを再読み込み後、Git状態取得、選択的Stage、Commit最終確認、Commit、Git状態再取得の通常操作を確認した。実機での表示再取得失敗を無理に発生させるために`.git`やネットワークを破壊する試験は行わない。
+
+表示再取得失敗の分岐は、Host境界でStageまたはCommitの成功後に`git_snapshot`だけを失敗させる自動試験で確認した。操作結果は成功として返り、永続実行記録を残さず、後続の`git_snapshot`が実行できる。Git indexの短縮・終端欠落も検証エラーとして拒否する。
+
+- `python3 -m unittest tests/test_git_ops.py`：20件成功。
+- `python3 -m unittest tests/test_host.py`：31件成功。
+- `python3 -m unittest discover -s tests -v`：52件成功（上記の回帰試験を含む）。
+- `python3 -m py_compile native_host/focodex.py native_host/git_ops.py`、`node --check extension/probe.js`、`git diff --check`：成功。
+
+これはPull・Pushの認証・通信経路を検証したものではない。次段階は[Pull・Push事前調査・検証事項](../specification/Focodex_Pull_Push_事前調査・検証事項.md)に従い、まずSurfaceの実行環境と認証経路を非破壊に確認する。
+
+## Pull・Pushの通信なしSandbox事前試験（2026-10-23）
+
+`git_remote_sandbox_probe`を追加し、SurfaceのFirefox/Cageから実行した。SELinuxは`Enforcing`のままで試験は成功した。Sandboxはネットワーク名前空間を共有せず、対象リポジトリだけを読取り専用で公開し、ホスト`HOME`を公開せず、SSH Agentソケットだけを固定したSandbox内パスにbindする。Sandbox内でAgentへの接続、対象リポジトリへの書込み拒否、`/home`の非公開を確認した。
+
+この結果は、限定したファイル境界とAgent受渡しが当該環境で機能したことを示す。SSH鍵の宛先制限、SSH接続、DNS、Fetch、Push、リモート参照・作業ツリーの変更は試験していない。ネットワークをホストと共有する設定は追加しておらず、Pull・Pushは未実装・未許可である。次は、宛先を限定した通信経路を別途設計・検証する。
+
+固定宛先・一接続のUnixソケット中継`FixedTargetProxy`を追加した。Sandbox側は中継先host/portを指定できず、Hostが固定した宛先にだけTCP接続する。中継ソケットはmode `0700`の一時ディレクトリ内にmode `0600`で作る。まだNative Messaging要求やGit操作からは呼び出さない。自動試験はソケット生成・固定宛先・一接続・不正入力拒否をモックで確認した。開発環境がAF_UNIXソケット作成を禁止するため、実ソケット通信の確認はSurfaceに留保した。
+
+その後、Surfaceで「中継事前試験」が成功した。Sandboxはネットワーク非共有・Agent非公開のまま、Host固定のループバックエコー宛先とのUnixソケット通信を確認した。外部通信、SSH、Git、Fetch、Pull、Push、作業ツリー変更は行っていない。専用AgentのNative Host継承、Agent内鍵、対象ホストの既知鍵存在も確認済み。既知鍵の最小抽出と固定SSH設定を追加し、自動試験58件が成功した。実upstreamへのSSH接続は未実装・未実行である。
+
+## 読み取り専用SSH接続試験の実装とSurface安全停止（2026-10-23）
+
+固定宛先・一接続中継、最小known_hosts、明示設定された専用Agent、固定SSH設定を一操作へ統合し、`git ls-remote --exit-code`だけを実行する`git_remote_ssh_probe`を追加した。Fetch、Pull、Push、作業ツリー・参照の変更は行わない。Agentは共有の`SSH_AUTH_SOCK`を流用せず、`FOCODEX_REMOTE_AGENT`で指定された本人所有・group/other非公開のUnixソケットだけを受理する。Hostインストーラーはこの既定ソケットをNative Host起動時に設定する。
+
+Surfaceでは専用AgentへGitHub用鍵をdestination constraint付きで登録し、ソケットの本人所有・`0600`を確認した。更新Hostと拡張の再読み込み後、画面に「読み取り専用SSH接続試験」ボタンが表示された。実行前のリモート事前診断は、scp形式のremote URLを許可しないため拒否した。
+
+その後、Host再登録・拡張再読み込みの過程で前回Codexの専用プロセス群の終了を確認できない永続記録が残った。Focodexは意図どおりCodex・Git操作・設定変更を拒否し、画面にOS再起動後の再接続と実行記録を削除しない旨を表示した。実upstreamへのSSH接続は未実行である。SurfaceをOS再起動後、`origin`を明示的な`ssh://`形式にしてから、同試験を再開する。

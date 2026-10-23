@@ -19,6 +19,7 @@ import time
 import uuid
 
 import git_ops
+import git_remote
 
 CONFIG = Path(os.environ.get('FOCODEX_CONFIG', Path.home() / '.config/focodex/config.json'))
 MAX_NATIVE = 128 * 1024
@@ -134,6 +135,22 @@ def git_snapshot(project):
             raise ValueError('Git差分の合計が表示上限を超えました。')
         rows.append(row)
     return {'files': rows}
+
+
+def git_remote_preflight(project):
+    """Return only non-secret prerequisites for a future remote Git operation."""
+    repo = git_ops.Repository(project)
+    ref, _ = repo.branch()
+    remote, merge, _target = git_remote.upstream_ssh_remote(repo)
+    upstream = remote + '/' + merge.removeprefix('refs/heads/')
+    agent = os.environ.get('SSH_AUTH_SOCK')
+    try:
+        agent_available = bool(agent) and stat.S_ISSOCK(os.stat(agent).st_mode)
+    except OSError:
+        agent_available = False
+    return {'branch': ref, 'upstream': upstream, 'sshAgentAvailable': agent_available,
+            'bwrapAvailable': Path('/usr/bin/bwrap').is_file(),
+            'gitAvailable': Path(git_ops.GIT).is_file(), 'sshAvailable': Path('/usr/bin/ssh').is_file()}
 
 
 def toml_value(value):
@@ -719,7 +736,7 @@ class Host:
         if value.get('type') == 'respond':
             self.respond(value)
             return
-        if value.get('type') in ('git_snapshot', 'git_stage', 'git_review', 'git_commit'):
+        if value.get('type') in ('git_snapshot', 'git_stage', 'git_review', 'git_commit', 'git_remote_preflight', 'git_remote_sandbox_probe', 'git_remote_relay_probe', 'git_remote_ssh_probe'):
             self.git_command(value)
             return
         if value.get('type') not in ('run', 'models'):
@@ -789,7 +806,7 @@ class Host:
 
     def git_command(self, value):
         operation = value['type']
-        fields = {'git_snapshot': set(), 'git_stage': {'files', 'snapshotToken'},
+        fields = {'git_snapshot': set(), 'git_remote_preflight': set(), 'git_remote_sandbox_probe': set(), 'git_remote_relay_probe': set(), 'git_remote_ssh_probe': set(), 'git_stage': {'files', 'snapshotToken'},
                   'git_review': {'message'}, 'git_commit': {'reviewToken'}}
         if set(value) - ({'type', 'id', 'projectId', 'workspaceId'} | fields[operation]):
             raise ValueError('未対応のGit引数です。')
@@ -810,6 +827,17 @@ class Host:
             atomic_json(execution_path(), {'version': 1, 'token': token, 'bootId': boot_id(),
                         'operation': operation, 'workspaceRoots': [project], 'startedAt': time.time()})
             repo = None
+            operation_confirmed = False
+
+            def confirm_operation():
+                nonlocal operation_confirmed
+                state = execution_state()
+                if not state or state['token'] != token:
+                    raise git_ops.UncertainGit('Git実行記録を照合できません。')
+                remove_execution_state()
+                repo.uncertain = False
+                operation_confirmed = True
+
             try:
                 repo = git_ops.Repository(project)
                 if operation == 'git_snapshot':
@@ -825,17 +853,36 @@ class Host:
                     except (ValueError, OSError) as error:
                         result.update(canModify=False, modificationError=str(error))
                     self.git_reviews.pop(key, None)
+                elif operation == 'git_remote_preflight':
+                    self.git_snapshots.pop(key, None)
+                    self.git_reviews.pop(key, None)
+                    result = git_remote_preflight(project)
+                elif operation == 'git_remote_sandbox_probe':
+                    self.git_snapshots.pop(key, None)
+                    self.git_reviews.pop(key, None)
+                    result = git_remote.sandbox_probe(project)
+                elif operation == 'git_remote_relay_probe':
+                    self.git_snapshots.pop(key, None)
+                    self.git_reviews.pop(key, None)
+                    result = git_remote.relay_probe(project)
+                elif operation == 'git_remote_ssh_probe':
+                    self.git_snapshots.pop(key, None)
+                    self.git_reviews.pop(key, None)
+                    result = git_remote.readonly_ssh_probe(project)
                 elif operation == 'git_stage':
                     snapshot = self.git_snapshots.pop(key, None)
                     self.git_reviews.pop(key, None)
                     if not snapshot or value.get('snapshotToken') != snapshot[0] or time.monotonic() - snapshot[2] > 900:
                         raise ValueError('Git状態を再取得してからファイルを選択してください。')
                     repo.stage(value.get('files'), snapshot[1])
-                    repo.uncertain = True
-                    result = git_snapshot(project)
-                    snapshot_token = secrets.token_urlsafe(24)
-                    self.git_snapshots[key] = (snapshot_token, git_ops.Repository(project).fingerprint(), time.monotonic())
-                    result.update(canModify=True, snapshotToken=snapshot_token)
+                    confirm_operation()
+                    try:
+                        result = git_snapshot(project)
+                        snapshot_token = secrets.token_urlsafe(24)
+                        self.git_snapshots[key] = (snapshot_token, git_ops.Repository(project).fingerprint(), time.monotonic())
+                        result.update(canModify=True, snapshotToken=snapshot_token)
+                    except (ValueError, OSError) as error:
+                        result = {'refreshError': str(error)}
                 elif operation == 'git_review':
                     self.git_reviews.pop(key, None)
                     review = repo.review(value.get('message'))
@@ -853,13 +900,13 @@ class Host:
                     if not stored or value.get('reviewToken') != stored[0] or time.monotonic() - stored[2] > 900:
                         raise ValueError('Commit内容を最終確認してください。')
                     result = repo.commit(stored[1])
-                    repo.uncertain = True
-                    result['files'] = git_snapshot(project)['files']
-                state = execution_state()
-                if not state or state['token'] != token:
-                    raise git_ops.UncertainGit('Git実行記録を照合できません。')
-                remove_execution_state()
-                repo.uncertain = False
+                    confirm_operation()
+                    try:
+                        result['files'] = git_snapshot(project)['files']
+                    except (ValueError, OSError) as error:
+                        result['refreshError'] = str(error)
+                if not operation_confirmed:
+                    confirm_operation()
             except BaseException as error:
                 if isinstance(error, git_ops.UncertainGit) or repo is not None and repo.uncertain or not isinstance(error, (ValueError, OSError)):
                     self.cleanup_uncertain = True

@@ -646,6 +646,7 @@ class HostTests(unittest.TestCase):
         self.assertTrue(os.access(manifest['path'], os.X_OK))
         self.assertEqual(manifest['allowed_extensions'], ['focodex@foxbook.example'])
         self.assertTrue((target / '.local/lib/focodex/git_ops.py').is_file())
+        self.assertTrue((target / '.local/lib/focodex/git_remote.py').is_file())
 
 
 if __name__ == '__main__':

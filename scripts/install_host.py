@@ -23,10 +23,15 @@ def install(home, codex):
     git_module = target / 'git_ops.py'
     shutil.copyfile(ROOT / 'native_host/git_ops.py', git_module)
     git_module.chmod(0o600)
+    remote_module = target / 'git_remote.py'
+    shutil.copyfile(ROOT / 'native_host/git_remote.py', remote_module)
+    remote_module.chmod(0o600)
     launcher = target / 'launch'
     # JSON quoting is not shell escaping. Quote executable paths with shlex.
     import shlex
-    launcher.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(host)) + ' "$@"\n')
+    launcher.write_text('#!/bin/sh\n'
+                        'export FOCODEX_REMOTE_AGENT="${FOCODEX_REMOTE_AGENT:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/focodex/remote-agent.sock}"\n'
+                        'exec ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(host)) + ' "$@"\n')
     launcher.chmod(0o700)
     config = home / '.config/focodex/config.json'
     config.parent.mkdir(parents=True, exist_ok=True)

@@ -4,7 +4,9 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
+import struct
 import sys
 import tempfile
 import time
@@ -14,6 +16,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'native_host'))
 import git_ops
+import git_remote
 spec = importlib.util.spec_from_file_location('git_probe', ROOT / 'scripts/probe_host.py')
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
@@ -188,6 +191,114 @@ class GitTests(unittest.TestCase):
         for operation in ('git_pull', 'git_push', 'git_fetch'):
             self.assertEqual(self.request(operation)['type'], 'error')
 
+    def test_remote_preflight_is_read_only_and_reports_no_secret_values(self):
+        self.git('config', 'branch.main.remote', 'origin')
+        self.git('config', 'branch.main.merge', 'refs/heads/main')
+        self.git('remote', 'add', 'origin', 'ssh://git@example.test/team/repository.git')
+        result = self.request('git_remote_preflight')
+        self.assertEqual(result['type'], 'git_remote_preflight', result)
+        self.assertEqual(result['branch'], 'refs/heads/main')
+        self.assertEqual(result['upstream'], 'origin/main')
+        self.assertIsInstance(result['sshAgentAvailable'], bool)
+        self.assertNotIn('url', result)
+        self.assertFalse(self.config.with_suffix('.execution.json').exists())
+
+    def test_ssh_remote_parser_rejects_ambiguous_or_implicit_forms(self):
+        target = git_remote.parse_ssh_remote('ssh://git@example.test:2222/team/repository.git')
+        self.assertEqual(target, git_remote.SshRemote('git', 'example.test', 2222, '/team/repository.git'))
+        for value in ('git@example.test:team/repository.git', 'ssh://example.test/team/repository.git',
+                      'ssh://git@example.test/', 'ssh://git@example.test//team/repository.git',
+                      'ssh://git@example.test/team/repository.git?x=1',
+                      'ssh://git@[2001:db8::1]/team/repository.git',
+                      'https://git@example.test/team/repository.git',
+                      'ssh://git:password@example.test/team/repository.git'):
+            with self.assertRaises(ValueError, msg=value):
+                git_remote.parse_ssh_remote(value)
+
+    def test_remote_preflight_requires_one_explicit_ssh_url_without_pushurl(self):
+        self.git('config', 'branch.main.remote', 'origin')
+        self.git('config', 'branch.main.merge', 'refs/heads/main')
+        self.git('remote', 'add', 'origin', 'git@example.test:team/repository.git')
+        self.assertEqual(self.request('git_remote_preflight')['type'], 'error')
+        self.git('remote', 'set-url', 'origin', 'ssh://git@example.test/team/repository.git')
+        self.git('config', 'remote.origin.pushurl', 'ssh://git@example.test/team/repository.git')
+        self.assertEqual(self.request('git_remote_preflight')['type'], 'error')
+
+    def test_remote_sandbox_arguments_mount_only_project_and_agent_socket(self):
+        agent = self.root / 'agent.sock'
+        agent.write_bytes(b'not-a-real-socket')
+        with mock.patch.object(git_remote.stat, 'S_ISSOCK', return_value=True):
+            args = git_remote.sandbox_arguments(self.repo, agent)
+        self.assertIn('--unshare-all', args)
+        self.assertIn(str(self.repo), args)
+        self.assertIn(str(agent), args)
+        self.assertIn('/run/focodex/agent.sock', args)
+        self.assertNotIn('--share-net', args)
+        self.assertNotIn('/home', args[:args.index('/bin/sh')])
+
+    def test_relay_sandbox_arguments_expose_neither_network_nor_agent(self):
+        args = git_remote.relay_arguments(self.repo)
+        self.assertIn('--unshare-all', args)
+        self.assertNotIn('--share-net', args)
+        self.assertNotIn('SSH_AUTH_SOCK', args)
+        self.assertNotIn('/run/focodex/agent.sock', args)
+
+    def test_known_host_entries_returns_only_matching_key_rows(self):
+        known = self.root / 'known_hosts'; known.write_text('placeholder\n')
+        completed = subprocess.CompletedProcess([], 0, b'# Host example found\nexample ssh-ed25519 key\n')
+        with mock.patch.object(git_remote.subprocess, 'run', return_value=completed):
+            self.assertEqual(git_remote.known_host_entries('example', known), b'example ssh-ed25519 key\n')
+        with mock.patch.object(git_remote.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, b'')):
+            with self.assertRaises(ValueError): git_remote.known_host_entries('example', known)
+
+    def test_remote_agent_must_be_explicit_private_socket_and_known_host_uses_port(self):
+        target = git_remote.SshRemote('git', 'example.test', 2222, '/team/repository.git')
+        self.assertEqual(git_remote.known_host_name(target), '[example.test]:2222')
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(ValueError): git_remote.dedicated_agent_socket()
+        agent = self.root / 'agent.sock'; agent.write_bytes(b'not a socket')
+        with mock.patch.dict(os.environ, {'FOCODEX_REMOTE_AGENT': str(agent)}):
+            with self.assertRaises(ValueError): git_remote.dedicated_agent_socket()
+
+    def test_fixed_ssh_config_disables_inherited_authentication_paths(self):
+        target = git_remote.SshRemote('git', 'example.test', 2222, '/team/repository.git')
+        config = git_remote.fixed_ssh_config(target).decode()
+        for line in ('StrictHostKeyChecking yes', 'UpdateHostKeys no', 'BatchMode yes',
+                     'PasswordAuthentication no', 'KbdInteractiveAuthentication no',
+                     'IdentitiesOnly yes', 'IdentityFile none', 'GlobalKnownHostsFile /dev/null'):
+            self.assertIn(line, config)
+        self.assertIn('Host example.test', config)
+        self.assertIn('Port 2222', config)
+        self.assertIn('ProxyCommand /usr/bin/python3 /run/focodex/ssh_proxy.py /run/focodex/transport.sock', config)
+
+    def test_fixed_target_proxy_allows_one_local_client_only_to_fixed_endpoint(self):
+        # This harness prohibits all socket creation, including AF_UNIX.  Mock
+        # only verifies the fail-closed wiring; real socket behavior remains a
+        # required Surface test before exposing this helper to SSH.
+        listener = mock.MagicMock()
+        client = mock.MagicMock()
+        remote = mock.MagicMock()
+        remote.__enter__.return_value = remote
+        listener.accept.return_value = (client, None)
+        with mock.patch.object(git_remote.socket, 'socket', return_value=listener), \
+             mock.patch.object(git_remote.socket, 'create_connection', return_value=remote) as create, \
+             mock.patch.object(git_remote.os, 'chmod') as chmod, \
+             mock.patch.object(git_remote.FixedTargetProxy, '_relay') as relay:
+            with git_remote.FixedTargetProxy('fixed.example.test', 2200) as proxy:
+                proxy.serve_once()
+                listener.bind.assert_called_once_with(str(proxy.socket_path))
+                listener.listen.assert_called_once_with(1)
+                listener.accept.assert_called_once()
+                create.assert_called_once_with(('fixed.example.test', 2200), timeout=git_remote.TIMEOUT)
+                relay.assert_called_once_with(client, remote)
+                client.close.assert_called_once()
+                self.assertIn(mock.call(proxy.socket_path, 0o600), chmod.call_args_list)
+        self.assertFalse(proxy.socket_path.exists())
+        with self.assertRaises(ValueError):
+            git_remote.FixedTargetProxy('', 2200)
+        with self.assertRaises(ValueError):
+            git_remote.FixedTargetProxy('fixed.example.test', 0)
+
     def test_settings_attributes_and_helpers_are_refused_without_execution(self):
         marker = self.root / 'helper-ran'
         helper = self.root / 'helper'
@@ -233,6 +344,16 @@ class GitTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertFalse((self.root / 'wrong-index').exists())
         self.assertNotIn('\ngpgsig ', self.git('cat-file', 'commit', 'HEAD'))
+
+    def test_local_git_environment_does_not_inherit_ssh_agent_or_git_variables(self):
+        # Remote operations must use their own explicitly sandboxed environment;
+        # the local stage/commit path must never gain agent access by accident.
+        with mock.patch.dict(os.environ, {'SSH_AUTH_SOCK': '/tmp/forbidden-agent',
+                                          'GIT_SSH_COMMAND': 'forbidden-command'}):
+            env = git_ops.environment()
+        self.assertNotIn('SSH_AUTH_SOCK', env)
+        self.assertNotIn('GIT_SSH_COMMAND', env)
+        self.assertEqual(env['GIT_CONFIG_GLOBAL'], '/dev/null')
 
     def test_worktree_commit_and_detached_or_conflict_rejection(self):
         source = self.repo
@@ -318,8 +439,9 @@ focodex.main()
         self.assertTrue(self.config.with_suffix('.execution.json').exists())
         self.assertTrue((self.repo / '.git/index.lock').exists(), 'Do not automatically remove an abandoned Git lock')
 
-    def test_post_commit_verification_failure_is_durable_and_not_success(self):
-        # Exercise the actual Host boundary, after the ref was already updated.
+    def test_post_commit_display_failure_keeps_confirmed_success_recoverable(self):
+        # The ref update was confirmed; a later display refresh must not turn it
+        # into an indeterminate operation that blocks all future Git actions.
         host_spec = importlib.util.spec_from_file_location('git_host_test', ROOT / 'native_host/focodex.py')
         module = importlib.util.module_from_spec(host_spec)
         host_spec.loader.exec_module(module)
@@ -331,13 +453,52 @@ focodex.main()
         key = ('test', 'test', str(self.repo))
         host.git_snapshots = {}
         host.git_reviews = {key: ('token', review, time.monotonic())}
-        with mock.patch.object(module, 'CONFIG', self.config), mock.patch.object(module, 'git_snapshot', side_effect=ValueError('postflight failed')):
-            with self.assertRaisesRegex(ValueError, 'postflight failed'):
-                host.git_command({'type': 'git_commit', 'id': 'commit', 'projectId': 'test', 'reviewToken': 'token'})
-        self.assertTrue(host.cleanup_uncertain)
-        self.assertTrue(self.config.with_suffix('.execution.json').exists())
+        sent = []
+        with (mock.patch.object(module, 'CONFIG', self.config),
+              mock.patch.object(module, 'git_snapshot', side_effect=ValueError('postflight failed')),
+              mock.patch.object(module, 'send', side_effect=sent.append)):
+            host.git_command({'type': 'git_commit', 'id': 'commit', 'projectId': 'test', 'reviewToken': 'token'})
+        self.assertFalse(host.cleanup_uncertain)
+        self.assertFalse(self.config.with_suffix('.execution.json').exists())
         self.assertEqual(self.git('log', '-1', '--format=%s').strip(), 'message')
-        self.assertEqual(self.request('git_commit', reviewToken='token')['type'], 'error')
+        self.assertEqual(sent, [{'type': 'git_commit', 'id': 'commit', 'commit': mock.ANY,
+                                 'ref': 'refs/heads/main', 'tree': mock.ANY, 'message': 'message',
+                                 'refreshError': 'postflight failed'}])
+        self.assertEqual(self.request('git_snapshot')['type'], 'git_snapshot')
+
+    def test_post_stage_display_failure_keeps_confirmed_success_recoverable(self):
+        host_spec = importlib.util.spec_from_file_location('git_host_stage_test', ROOT / 'native_host/focodex.py')
+        module = importlib.util.module_from_spec(host_spec)
+        host_spec.loader.exec_module(module)
+        (self.repo / 'a.txt').write_text('selected\n')
+        host = module.Host.__new__(module.Host)
+        host.process = None; host.cleanup_uncertain = False
+        key = ('test', 'test', str(self.repo))
+        host.git_reviews = {}
+        host.git_snapshots = {key: ('token', git_ops.Repository(self.repo).fingerprint(), time.monotonic())}
+        sent = []
+        with (mock.patch.object(module, 'CONFIG', self.config),
+              mock.patch.object(module, 'git_snapshot', side_effect=ValueError('postflight failed')),
+              mock.patch.object(module, 'send', side_effect=sent.append)):
+            host.git_command({'type': 'git_stage', 'id': 'stage', 'projectId': 'test',
+                              'snapshotToken': 'token', 'files': ['a.txt']})
+        self.assertFalse(host.cleanup_uncertain)
+        self.assertFalse(self.config.with_suffix('.execution.json').exists())
+        self.assertEqual(self.git('show', ':a.txt'), 'selected\n')
+        self.assertEqual(sent, [{'type': 'git_stage', 'id': 'stage', 'refreshError': 'postflight failed'}])
+        self.assertEqual(self.request('git_snapshot')['type'], 'git_snapshot')
+
+    def test_malformed_index_is_rejected_as_a_validation_error(self):
+        index = self.repo / '.git/index'
+        original = index.read_bytes()
+        checksum = b'\0' * 20
+        for payload in (b'DIRC' + struct.pack('>II', 2, 1) + checksum,
+                        b'DIRC' + struct.pack('>II', 2, 1) + b'\1' * 62 + checksum):
+            index.write_bytes(original)
+            repo = git_ops.Repository(self.repo)
+            index.write_bytes(payload)
+            with self.assertRaisesRegex(ValueError, 'インデックス構造を確認できません。'):
+                repo.writable()
 
     def test_git_timeout_and_output_overflow_kill_process_group(self):
         fake = self.root / 'fake-git'
