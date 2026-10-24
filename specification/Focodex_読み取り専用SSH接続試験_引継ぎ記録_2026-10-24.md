@@ -21,7 +21,7 @@
 | `origin` | `ssh://git@github.com/tuyomori-cyber/git-test.git` |
 | 現在ブランチ / upstream | `main` / `origin/main` |
 | GNOME Keyring | GDM/PAMログイン後にLoginコレクションが自動解除される |
-| 専用Agent | foxbook起動後に`$XDG_RUNTIME_DIR/focodex/remote-agent.sock`が`ready`。`ssh-add -l`は成功 |
+| 専用Agent | SurfaceのOS再起動後、foxbook起動により`$XDG_RUNTIME_DIR/focodex/remote-agent.sock`が再生成され、Keyring解除・設定・Secret Service項目・`ssh-add -l`を含む`remote_agent.py`の全診断が`ready`まで成功 |
 | GitHub鍵認証 | 同専用Agentで`ssh -T git@github.com`が想定アカウントとして成功 |
 | リポジトリ / ブランチ | 同Agent・隔離Git環境で直接実行した`git ls-remote --exit-code origin refs/heads/main`が成功 |
 | Focodex事前診断 | branch=`main`、upstream=`origin/main`、専用Agent・bwrap/Git/SSHは利用可能 |

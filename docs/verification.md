@@ -350,3 +350,5 @@ Surfaceでは一時的に手動作成した専用AgentへGitHub用鍵をdestinat
 終了未確認記録の解除、`git-test`の明示SSH URL化、専用Agentの鍵登録、GitHub認証、直接の`ls-remote`、リモート事前診断、中継事前試験はSurfaceで確認できた。しかしFocodex画面の読み取り専用SSH接続試験は失敗を継続している。最新の安全な診断では、固定SSHラッパーは実接続として起動した一方、Sandboxから`FixedTargetProxy`への接続は受理されていない。実upstream試験は未成功であり、Fetch / Pull / Pushは未実装・未実行である。
 
 詳細、最新の診断値、秘密情報を出さない追加調査の制約、Surface上のCodex CLIへの引継ぎ手順は[読み取り専用SSH接続試験 引継ぎ記録](../specification/Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md)に集約した。
+
+同日にSurfaceを再起動してfoxbookを起動し、`remote_agent.py`のKeyring解除、固定設定、Secret Service項目、専用Agent状態を再確認した。すべて期待値どおりで、最後の状態は`ready`であった。したがって、再起動をまたぐ専用Agent再生成と鍵自動登録は確認済みである。
