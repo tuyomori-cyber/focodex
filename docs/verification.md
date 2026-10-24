@@ -344,3 +344,9 @@ Surfaceでは一時的に手動作成した専用AgentへGitHub用鍵をdestinat
 その後、Host再登録・拡張再読み込みの過程で前回Codexの専用プロセス群の終了を確認できない永続記録が残った。Focodexは意図どおりCodex・Git操作・設定変更を拒否し、画面にOS再起動後の再接続と実行記録を削除しない旨を表示した。実upstreamへのSSH接続は未実行である。
 
 2026-10-24に、GDM/PAMからGNOME KeyringのLoginコレクションを自動解除できることを再起動後に確認した。同日に認証管理コンポーネントを追加し、Keyring状態診断、固定設定・鍵ファイルの権限検証、空の専用Agent生成、固定属性のSecret Service項目を使う限定Askpass、固定鍵の登録を実装した。Surfaceでは`firefox-kiosk-app`からAgentを再生成して鍵登録し、ログイン後に`remote_agent.py status`が`ready`となることを確認した。通常のSSH AgentとGNOME Keyringは停止しない。実upstream試験の残る条件は、終了未確認記録の解除と`origin`の明示的な`ssh://`形式への変更である。
+
+## Surface実upstream試験の未解決記録と開発移管（2026-10-24）
+
+終了未確認記録の解除、`git-test`の明示SSH URL化、専用Agentの鍵登録、GitHub認証、直接の`ls-remote`、リモート事前診断、中継事前試験はSurfaceで確認できた。しかしFocodex画面の読み取り専用SSH接続試験は失敗を継続している。最新の安全な診断では、固定SSHラッパーは実接続として起動した一方、Sandboxから`FixedTargetProxy`への接続は受理されていない。実upstream試験は未成功であり、Fetch / Pull / Pushは未実装・未実行である。
+
+詳細、最新の診断値、秘密情報を出さない追加調査の制約、Surface上のCodex CLIへの引継ぎ手順は[読み取り専用SSH接続試験 引継ぎ記録](../specification/Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md)に集約した。
