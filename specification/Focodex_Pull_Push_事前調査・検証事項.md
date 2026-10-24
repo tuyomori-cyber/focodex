@@ -191,6 +191,12 @@ SurfaceのFirefox/Cageで「中継事前試験」が成功した。これはSand
 
 専用一時Agentについては、Firefox Native Hostの「リモート事前診断」で利用可能を確認した。端末側でも専用ソケットとAgent内鍵が利用可能であることを確認した。対象ホストの既知鍵は`ssh-keygen -F`で存在を確認したが、ホスト名・鍵・URLは記録していない。
 
-Host側には対象ホストの一致行だけを抽出する`known_host_entries()`、および専用known_hosts・厳格なホスト鍵照合・非対話認証・鍵ファイル探索禁止を指定する固定SSH設定を追加した。さらにupstreamのリモートURLは、明示的な`ssh://user@host[:port]/path`形式だけを受理する解析器を追加した。scp形式、暗黙のユーザー名、IPリテラル、query/fragment、複数URL、`pushurl`は拒否する。解析結果のURL・host・user・pathは拡張へ返さない。固定構成を統合した`ls-remote`限定の読み取り専用SSH接続試験を実装し、Host・画面回帰試験は成功した。Surfaceでは専用Agentと画面表示を確認済みだが、終了未確認の安全停止中のため実upstreamへの試験は未実行である。OS再起動と明示SSH URLへの変更後に再開する。
+Host側には対象ホストの一致行だけを抽出する`known_host_entries()`、および専用known_hosts・厳格なホスト鍵照合・非対話認証・鍵ファイル探索禁止を指定する固定SSH設定を追加した。さらにupstreamのリモートURLは、明示的な`ssh://user@host[:port]/path`形式だけを受理する解析器を追加した。scp形式、暗黙のユーザー名、IPリテラル、query/fragment、複数URL、`pushurl`は拒否する。解析結果のURL・host・user・pathは拡張へ返さない。固定構成を統合した`ls-remote`限定の読み取り専用SSH接続試験を実装し、Host・画面回帰試験は成功した。Surfaceでは一時的に手動作成した専用Agentと画面表示を確認したが、終了未確認の安全停止中のため実upstreamへの試験は未実行である。
+
+### 2026-10-24：GNOME Keyring自動解除と認証経路の現状
+
+GDM/PAMによりGNOME KeyringのLoginコレクションが自動解除されることを、Surface再起動後に`Locked=false`で実機確認した。OSログインパスワード変更後も鍵保管庫が旧パスワードを保持していたことが原因であり、鍵保管庫のパスワードを現行OSパスワードへ変更して解消した。詳細は[GNOME Keyring調査記録](foxbook_GNOME_Keyring_調査記録_2026-10-24.md)を参照する。
+
+この成功は鍵保管庫までであり、SSH鍵のパスフレーズ取得、専用Agentの起動、鍵の登録は未実装である。Hostの既定ソケットは`$XDG_RUNTIME_DIR/focodex/remote-agent.sock`であり、認証管理コンポーネントもこのパスへ専用Agentを作成しなければならない。OS再起動後は、当該コンポーネントの再起動試験と終了未確認記録の解除、`origin`の明示SSH URL化を確認した後にのみ実upstreamへの読み取り専用試験を再開する。
 
 ※本書は実施前のチェックリストであり、記載事項は検証済みの結果ではない。

@@ -551,7 +551,7 @@ $("connect").addEventListener("click", () => {
         resetGit();
         const availability = message.sshAgentAvailable ? "利用可能" : "利用不可";
         const tools = message.bwrapAvailable && message.gitAvailable && message.sshAvailable ? "利用可能" : "不足";
-        $("git-message").textContent = `リモート事前診断: ブランチ=${branchName(message.branch)}、upstream=${message.upstream || "未設定"}、SSH Agent=${availability}、bwrap/Git/SSH=${tools}。ネットワーク通信・Git変更は行っていません。`;
+        $("git-message").textContent = `リモート事前診断: ブランチ=${branchName(message.branch)}、upstream=${message.upstream || "未設定"}、専用SSH Agent=${availability}、bwrap/Git/SSH=${tools}。ネットワーク通信・Git変更は行っていません。`;
       } else if (message.type === "git_remote_sandbox_probe") {
         resetGit();
         $("git-message").textContent = "Sandbox事前試験に成功: ネットワーク非共有、対象リポジトリは読取り専用、ホストHOMEは非公開、SSH Agentは利用可能です。Gitの通信・変更は行っていません。";

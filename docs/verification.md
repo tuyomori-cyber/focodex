@@ -339,6 +339,8 @@ Git用の起動前永続記録と共有ロックを追加。設定・属性・�
 
 固定宛先・一接続中継、最小known_hosts、明示設定された専用Agent、固定SSH設定を一操作へ統合し、`git ls-remote --exit-code`だけを実行する`git_remote_ssh_probe`を追加した。Fetch、Pull、Push、作業ツリー・参照の変更は行わない。Agentは共有の`SSH_AUTH_SOCK`を流用せず、`FOCODEX_REMOTE_AGENT`で指定された本人所有・group/other非公開のUnixソケットだけを受理する。Hostインストーラーはこの既定ソケットをNative Host起動時に設定する。
 
-Surfaceでは専用AgentへGitHub用鍵をdestination constraint付きで登録し、ソケットの本人所有・`0600`を確認した。更新Hostと拡張の再読み込み後、画面に「読み取り専用SSH接続試験」ボタンが表示された。実行前のリモート事前診断は、scp形式のremote URLを許可しないため拒否した。
+Surfaceでは一時的に手動作成した専用AgentへGitHub用鍵をdestination constraint付きで登録し、ソケットの本人所有・`0600`を確認した。更新Hostと拡張の再読み込み後、画面に「読み取り専用SSH接続試験」ボタンが表示された。実行前のリモート事前診断は、scp形式のremote URLを許可しないため拒否した。
 
-その後、Host再登録・拡張再読み込みの過程で前回Codexの専用プロセス群の終了を確認できない永続記録が残った。Focodexは意図どおりCodex・Git操作・設定変更を拒否し、画面にOS再起動後の再接続と実行記録を削除しない旨を表示した。実upstreamへのSSH接続は未実行である。SurfaceをOS再起動後、`origin`を明示的な`ssh://`形式にしてから、同試験を再開する。
+その後、Host再登録・拡張再読み込みの過程で前回Codexの専用プロセス群の終了を確認できない永続記録が残った。Focodexは意図どおりCodex・Git操作・設定変更を拒否し、画面にOS再起動後の再接続と実行記録を削除しない旨を表示した。実upstreamへのSSH接続は未実行である。
+
+2026-10-24に、GDM/PAMからGNOME KeyringのLoginコレクションを自動解除できることを再起動後に確認した。同日に認証管理コンポーネントを追加し、Keyring状態診断、固定設定・鍵ファイルの権限検証、空の専用Agent生成、固定属性のSecret Service項目を使う限定Askpass、固定鍵の登録を実装した。Surfaceでは`firefox-kiosk-app`からAgentを再生成して鍵登録し、ログイン後に`remote_agent.py status`が`ready`となることを確認した。通常のSSH AgentとGNOME Keyringは停止しない。実upstream試験の残る条件は、終了未確認記録の解除と`origin`の明示的な`ssh://`形式への変更である。

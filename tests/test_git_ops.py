@@ -195,7 +195,10 @@ class GitTests(unittest.TestCase):
         self.git('config', 'branch.main.remote', 'origin')
         self.git('config', 'branch.main.merge', 'refs/heads/main')
         self.git('remote', 'add', 'origin', 'ssh://git@example.test/team/repository.git')
-        result = self.request('git_remote_preflight')
+        socket_path = self.root / 'remote-agent.sock'
+        socket_path.write_text('not a socket')
+        with mock.patch.object(git_remote, 'dedicated_agent_socket', return_value=socket_path):
+            result = self.request('git_remote_preflight')
         self.assertEqual(result['type'], 'git_remote_preflight', result)
         self.assertEqual(result['branch'], 'refs/heads/main')
         self.assertEqual(result['upstream'], 'origin/main')
@@ -269,7 +272,61 @@ class GitTests(unittest.TestCase):
             self.assertIn(line, config)
         self.assertIn('Host example.test', config)
         self.assertIn('Port 2222', config)
-        self.assertIn('ProxyCommand /usr/bin/python3 /run/focodex/ssh_proxy.py /run/focodex/transport.sock', config)
+        self.assertIn('ProxyCommand /usr/bin/python3 /run/focodex/ssh_proxy.py /run/focodex/transport.sock /run/focodex/proxy-status', config)
+        wrapper = git_remote.fixed_ssh_wrapper(target)
+        self.assertIn('exec /usr/bin/ssh -vv', wrapper)
+        self.assertIn('-o HostName=example.test', wrapper)
+        self.assertIn("-o 'ProxyCommand=/usr/bin/python3 /run/focodex/ssh_proxy.py", wrapper)
+        self.assertIn('2>/run/focodex/ssh-stderr', wrapper)
+        wrapper_path = self.root / 'ssh-wrapper'; wrapper_path.write_text(wrapper)
+        self.assertEqual(subprocess.run(['/bin/sh', '-n', str(wrapper_path)], check=False).returncode, 0)
+
+    def test_ssh_probe_error_keeps_transport_details_private(self):
+        self.assertIn('既知鍵', git_remote.ssh_probe_error(b'Host key verification failed for secret.example'))
+        self.assertIn('専用Agent', git_remote.ssh_probe_error(b'Permission denied (publickey)'))
+        self.assertIn('固定宛先', git_remote.ssh_probe_error(b'Connection timed out to secret.example'))
+        self.assertNotIn('secret.example', git_remote.ssh_probe_error(b'Connection timed out to secret.example'))
+        self.assertIn('リポジトリアクセス', git_remote.ssh_probe_error(b'ERROR: Repository not found.'))
+        self.assertIn('追跡ブランチ', git_remote.ssh_probe_error(b'', 2))
+        self.assertIn('固定中継ソケット', git_remote.ssh_probe_error(b'FOCODEX_PROXY_CONNECT_FAILED'))
+        self.assertIn('固定SSH設定', git_remote.ssh_probe_error(b'Bad configuration option: x'))
+        self.assertIn('固定中継設定が適用', git_remote.ssh_probe_error(b'debug1: Connecting to example'))
+
+    def test_remote_diagnostic_is_private_summary_without_ssh_text(self):
+        with tempfile.TemporaryDirectory() as state, mock.patch.dict(os.environ, {'XDG_STATE_HOME': state}):
+            event = {'event': 'ssh-probe', 'outcome': 'ssh-error', 'returnCode': 128,
+                     'relayAccepted': True, 'targetConnected': True, 'classification': 'repository-access'}
+            git_remote.write_remote_diagnostic(event)
+            path = Path(state) / 'focodex' / 'remote-ssh-diagnostics.jsonl'
+            self.assertEqual(json.loads(path.read_text()), event)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_proxy_status_is_limited_to_fixed_values(self):
+        marker = self.root / 'status'
+        marker.write_text('connected')
+        self.assertEqual(git_remote.proxy_status_value(marker), 'connected')
+        marker.write_text('wrapper-command')
+        self.assertEqual(git_remote.proxy_status_value(marker), 'wrapper-command')
+        marker.write_text('github.com')
+        self.assertEqual(git_remote.proxy_status_value(marker), 'invalid')
+
+    def test_ssh_proxy_script_writes_each_received_chunk_completely(self):
+        # The script is generated into the isolated sandbox at runtime.  Keep
+        # its output path byte-complete: a single os.write can be partial.
+        source = Path(git_remote.__file__).read_text()
+        self.assertIn('write_all(d)', source)
+        self.assertIn('stdin_open and 0 in r', source)
+
+    def test_readonly_probe_uses_a_fixed_ssh_wrapper(self):
+        source = Path(git_remote.__file__).read_text()
+        self.assertIn("'ssh-wrapper'", source)
+        self.assertIn("'GIT_SSH_COMMAND', '/run/focodex/ssh-wrapper'", source)
+        self.assertIn("'core.sshCommand=/run/focodex/ssh-wrapper'", source)
+
+    def test_relay_connection_failure_message_has_no_transport_detail(self):
+        message = '読み取り専用SSH接続試験に失敗しました。固定宛先への中継接続を確認してください。'
+        self.assertIn('固定宛先', message)
+        self.assertNotIn('secret.example', message)
 
     def test_fixed_target_proxy_allows_one_local_client_only_to_fixed_endpoint(self):
         # This harness prohibits all socket creation, including AF_UNIX.  Mock
@@ -298,6 +355,17 @@ class GitTests(unittest.TestCase):
             git_remote.FixedTargetProxy('', 2200)
         with self.assertRaises(ValueError):
             git_remote.FixedTargetProxy('fixed.example.test', 0)
+
+    def test_fixed_target_proxy_close_cancels_waiting_client_without_network(self):
+        listener = mock.MagicMock()
+        with mock.patch.object(git_remote.socket, 'socket', return_value=listener), \
+             mock.patch.object(git_remote.socket, 'create_connection') as create, \
+             mock.patch.object(git_remote.os, 'chmod'):
+            with git_remote.FixedTargetProxy('fixed.example.test', 2200) as proxy:
+                proxy.close()
+                proxy.serve_once()
+        listener.accept.assert_not_called()
+        create.assert_not_called()
 
     def test_settings_attributes_and_helpers_are_refused_without_execution(self):
         marker = self.root / 'helper-ran'

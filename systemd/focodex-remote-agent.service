@@ -1,0 +1,10 @@
+[Unit]
+Description=Focodex dedicated empty SSH Agent
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/lib/focodex/remote_agent.py serve
+Restart=on-failure
+
+# This unit is intentionally not enabled by the installer.  Bind it to the
+# verified graphical session only after the Surface session-lifetime test.

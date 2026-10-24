@@ -184,6 +184,8 @@ node tests/test_draft.mjs
 
 確認したtreeだけをCommitし、作業ツリーの追加編集を混入させない。実インデックスを自動resetせず、ブランチを切り替えたり、競合を自動解消したりしない。Pull・Push・fetchは提供しない。
 
+リモートGitは、固定宛先・最小known_hosts・専用Agent・一接続中継を使う読み取り専用SSH接続試験まで実装済みで、実upstreamには未接続である。GDM/PAMによるGNOME Keyringの自動解除はSurfaceで確認済みだが、専用Agentを再起動後に復元して鍵を自動登録する機能は未実装である。詳細と再開条件は[Pull・Push事前調査・検証事項](specification/Focodex_Pull_Push_事前調査・検証事項.md)および[GNOME Keyring調査記録](specification/foxbook_GNOME_Keyring_調査記録_2026-10-24.md)を参照する。
+
 初版は表示可能なUTF-8テキスト、通常ファイル、index v2/v3が対象。バイナリCommit、リンク・submodule・sparse/split index、進行中のmerge/rebase、detached HEADなどは拒否する。外部フィルター・include等の設定や非対応の属性があれば、理由を表示して操作を止める。フックと署名は無効化し、認証ヘルパーや通信操作は呼び出さない。設定は自動修正しない。
 
 CodexとGitは同じ設定単位の排他と永続実行記録を共有する。Host設定と実行記録は、Codexが編集できるワークスペースとGit操作対象の外へ置く。Gitの時間切れ・シグナル終了・結果検証失敗でも禁止記録を残す。Host異常終了のタイミングによってはCommitが既に記録されている可能性があるため、自動再送しない。再起動後も残ったGitのindex.lockを自動削除しない。必要な状態確認はFocodex外で行う。

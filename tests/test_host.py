@@ -647,6 +647,9 @@ class HostTests(unittest.TestCase):
         self.assertEqual(manifest['allowed_extensions'], ['focodex@foxbook.example'])
         self.assertTrue((target / '.local/lib/focodex/git_ops.py').is_file())
         self.assertTrue((target / '.local/lib/focodex/git_remote.py').is_file())
+        self.assertTrue((target / '.local/lib/focodex/remote_agent.py').is_file())
+        self.assertTrue((target / '.config/systemd/user/focodex-remote-agent.service').is_file())
+        self.assertTrue((target / '.config/systemd/user/focodex-remote-key.service').is_file())
 
 
 if __name__ == '__main__':

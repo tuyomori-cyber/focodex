@@ -9,6 +9,8 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
+import json
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -17,9 +19,55 @@ import git_ops
 BWRAP = '/usr/bin/bwrap'
 TIMEOUT = 10
 RELAY_BUFFER = 64 * 1024
+CLOSE_POLL_SECONDS = 0.1
 SSH_USER = re.compile(r'^[A-Za-z_][A-Za-z0-9_-]{0,31}$')
 SSH_HOST = re.compile(
     r'^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$')
+
+
+def remote_diagnostic_path():
+    """Private, local-only summary log; it intentionally contains no inputs."""
+    state = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state'))
+    directory = state / 'focodex'
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        status = directory.lstat()
+        if (not stat.S_ISDIR(status.st_mode) or stat.S_ISLNK(status.st_mode) or
+                status.st_uid != os.geteuid() or status.st_mode & (stat.S_IRWXG | stat.S_IRWXO)):
+            raise OSError('unsafe diagnostic directory')
+        path = directory / 'remote-ssh-diagnostics.jsonl'
+        if path.exists():
+            file_status = path.lstat()
+            if (not stat.S_ISREG(file_status.st_mode) or stat.S_ISLNK(file_status.st_mode) or
+                    file_status.st_uid != os.geteuid() or file_status.st_mode & (stat.S_IRWXG | stat.S_IRWXO)):
+                raise OSError('unsafe diagnostic log')
+        return path
+    except OSError:
+        return None
+
+
+def write_remote_diagnostic(event):
+    """Best-effort, bounded diagnostic telemetry that cannot block Git safety."""
+    path = remote_diagnostic_path()
+    if path is None:
+        return
+    payload = json.dumps(event, sort_keys=True, separators=(',', ':')).encode() + b'\n'
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(descriptor, payload[:1024])
+        finally:
+            os.close(descriptor)
+    except OSError:
+        pass
+
+
+def proxy_status_value(path):
+    try:
+        value = Path(path).read_bytes().decode('ascii', 'ignore')
+    except OSError:
+        return 'unavailable'
+    return value if value in ('', 'wrapper-config-probe', 'wrapper-command', 'started', 'connected', 'connect-failed') else 'invalid'
 
 
 @dataclass(frozen=True)
@@ -124,7 +172,7 @@ def fixed_ssh_config(target=None):
     host = 'focodex-remote' if target is None else target.host
     identity = ('Host focodex-remote\n' if target is None else
                 f'Host {target.host}\n  HostName {target.host}\n  Port {target.port}\n  User {target.user}\n'
-                '  ProxyCommand /usr/bin/python3 /run/focodex/ssh_proxy.py /run/focodex/transport.sock\n')
+                '  ProxyCommand /usr/bin/python3 /run/focodex/ssh_proxy.py /run/focodex/transport.sock /run/focodex/proxy-status\n')
     return (identity +
             '  UserKnownHostsFile /run/focodex/known_hosts\n'
             '  GlobalKnownHostsFile /dev/null\n'
@@ -139,6 +187,35 @@ def fixed_ssh_config(target=None):
             '  ForwardAgent no\n'
             '  ControlMaster no\n'
             '  PermitLocalCommand no\n').encode()
+
+
+def fixed_ssh_wrapper(target):
+    """An executable fixed SSH policy, used ahead of Git-supplied arguments."""
+    if not isinstance(target, SshRemote):
+        raise ValueError('固定SSH設定を生成できません。')
+    return ('#!/bin/sh\n'
+            'case " $* " in *" -G "*) printf wrapper-config-probe > /run/focodex/proxy-status ;; '
+            '*) printf wrapper-command > /run/focodex/proxy-status ;; esac\n'
+            'exec /usr/bin/ssh -vv \\\n'
+            f'  -o HostName={target.host} \\\n'
+            f'  -o Port={target.port} \\\n'
+            f'  -o User={target.user} \\\n'
+            '  -o UserKnownHostsFile=/run/focodex/known_hosts \\\n'
+            '  -o GlobalKnownHostsFile=/dev/null \\\n'
+            '  -o StrictHostKeyChecking=yes \\\n'
+            '  -o UpdateHostKeys=no \\\n'
+            '  -o BatchMode=yes \\\n'
+            '  -o PasswordAuthentication=no \\\n'
+            '  -o KbdInteractiveAuthentication=no \\\n'
+            '  -o IdentitiesOnly=yes \\\n'
+            '  -o IdentityFile=none \\\n'
+            '  -o IdentityAgent=/run/focodex/agent.sock \\\n'
+            '  -o ForwardAgent=no \\\n'
+            '  -o ControlMaster=no \\\n'
+            '  -o PermitLocalCommand=no \\\n'
+            "  -o 'ProxyCommand=/usr/bin/python3 /run/focodex/ssh_proxy.py /run/focodex/transport.sock /run/focodex/proxy-status' \\\n"
+            '  "$@" 2>/run/focodex/ssh-stderr\n'
+            'exit $?\n')
 
 
 class FixedTargetProxy:
@@ -165,6 +242,8 @@ class FixedTargetProxy:
         os.chmod(self.socket_path, 0o600)
         self._listener.listen(1)
         self._closed = False
+        self.client_connected = False
+        self.target_connected = False
 
     def close(self):
         if self._closed:
@@ -181,15 +260,33 @@ class FixedTargetProxy:
 
     def serve_once(self, timeout=TIMEOUT):
         """Relay exactly one client; the destination cannot be supplied by it."""
-        if self._closed:
-            raise ValueError('中継はすでに終了しています。')
-        self._listener.settimeout(timeout)
+        # Closing a listener in a different thread does not reliably interrupt
+        # accept(2) on every supported Linux/Python combination.  Polling with
+        # a short bounded timeout lets close() finish an SSH failure path
+        # promptly, without treating that intentional shutdown as uncertain.
+        deadline = time.monotonic() + timeout
+        while not self._closed:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('Sandboxからの中継接続が時間切れです。')
+            self._listener.settimeout(min(remaining, CLOSE_POLL_SECONDS))
+            try:
+                client, _ = self._listener.accept()
+                self.client_connected = True
+                break
+            except TimeoutError:
+                continue
+            except OSError:
+                if self._closed:
+                    return
+                raise
+        else:
+            return
         try:
-            client, _ = self._listener.accept()
-        except TimeoutError as error:
-            raise TimeoutError('Sandboxからの中継接続が時間切れです。') from error
-        try:
+            if self._closed:
+                return
             with socket.create_connection((self.host, self.port), timeout=timeout) as remote:
+                self.target_connected = True
                 client.settimeout(timeout)
                 remote.settimeout(timeout)
                 self._relay(client, remote)
@@ -324,31 +421,167 @@ def readonly_ssh_probe(project):
     known = known_host_entries(known_host_name(target), Path.home() / '.ssh/known_hosts')
     with tempfile.TemporaryDirectory(prefix='focodex-ssh-') as directory:
         base = Path(directory); os.chmod(base, 0o700)
-        known_file, config_file, proxy_file = base / 'known_hosts', base / 'ssh_config', base / 'ssh_proxy.py'
+        known_file, config_file, proxy_file, wrapper_file, status_file, stderr_file = (base / 'known_hosts', base / 'ssh_config',
+                                                                                         base / 'ssh_proxy.py', base / 'ssh-wrapper',
+                                                                                         base / 'proxy-status', base / 'ssh-stderr')
         known_file.write_bytes(known); config_file.write_bytes(fixed_ssh_config(target))
-        proxy_file.write_text('import os,select,socket,sys\ns=socket.socket(socket.AF_UNIX);s.connect(sys.argv[1])\nwhile True:\n r,_,_=select.select([0,s],[],[])\n if 0 in r:\n  d=os.read(0,65536)\n  if not d:s.shutdown(socket.SHUT_WR)\n  else:s.sendall(d)\n if s in r:\n  d=s.recv(65536)\n  if not d:break\n  os.write(1,d)\n')
-        for path in (known_file, config_file, proxy_file): os.chmod(path, 0o600)
+        wrapper_file.write_text(fixed_ssh_wrapper(target))
+        status_file.write_bytes(b''); stderr_file.write_bytes(b'')
+        proxy_file.write_text('import os,select,socket,sys\n'
+                              'def status(v):\n'
+                              ' try:open(sys.argv[2],"wb").write(v)\n'
+                              ' except OSError:pass\n'
+                              'status(b"started")\n'
+                              's=socket.socket(socket.AF_UNIX)\n'
+                              'try:s.connect(sys.argv[1])\n'
+                              'except OSError:\n'
+                              ' status(b"connect-failed")\n'
+                              ' os.write(2,b"FOCODEX_PROXY_CONNECT_FAILED\\n")\n'
+                              ' raise SystemExit(111)\n'
+                              'status(b"connected")\n'
+                              'def write_all(d):\n'
+                              ' while d:\n'
+                              '  n=os.write(1,d)\n'
+                              '  d=d[n:]\n'
+                              'stdin_open=True\n'
+                              'while True:\n'
+                              ' r,_,_=select.select(([0] if stdin_open else [])+[s],[],[])\n'
+                              ' if stdin_open and 0 in r:\n'
+                              '  d=os.read(0,65536)\n'
+                              '  if not d:\n'
+                              '   s.shutdown(socket.SHUT_WR)\n'
+                              '   stdin_open=False\n'
+                              '  else:s.sendall(d)\n'
+                              ' if s in r:\n'
+                              '  d=s.recv(65536)\n'
+                              '  if not d:break\n'
+                              '  write_all(d)\n')
+        for path in (known_file, config_file, proxy_file, status_file, stderr_file): os.chmod(path, 0o600)
+        os.chmod(wrapper_file, 0o700)
         with FixedTargetProxy(target.host, target.port) as proxy:
             errors = []
             thread = threading.Thread(target=lambda: _relay_once(proxy, errors), daemon=True); thread.start()
             command = relay_arguments(project) + ['--bind', str(proxy.socket_path), '/run/focodex/transport.sock',
                 '--bind', str(agent), '/run/focodex/agent.sock', '--ro-bind', str(known_file), '/run/focodex/known_hosts',
                 '--ro-bind', str(config_file), '/run/focodex/ssh_config', '--ro-bind', str(proxy_file), '/run/focodex/ssh_proxy.py',
-                '--setenv', 'SSH_AUTH_SOCK', '/run/focodex/agent.sock', '--setenv', 'GIT_SSH_COMMAND', '/usr/bin/ssh -F /run/focodex/ssh_config',
+                '--ro-bind', str(wrapper_file), '/run/focodex/ssh-wrapper',
+                '--bind', str(status_file), '/run/focodex/proxy-status',
+                '--bind', str(stderr_file), '/run/focodex/ssh-stderr',
+                # GIT_SSH_COMMAND outranks a repository's core.sshCommand;
+                # GIT_SSH does not.  The wrapper is a fixed single pathname.
+                '--setenv', 'SSH_AUTH_SOCK', '/run/focodex/agent.sock', '--setenv', 'GIT_SSH_COMMAND', '/run/focodex/ssh-wrapper',
+                # The command is the pinned OpenSSH binary, but Git's
+                # heuristic can otherwise classify a command-with-options as
+                # a generic SSH client.  Pin its documented OpenSSH variant.
+                '--setenv', 'GIT_SSH_VARIANT', 'ssh',
                 '--setenv', 'GIT_CONFIG_NOSYSTEM', '1', '--setenv', 'GIT_CONFIG_GLOBAL', '/dev/null', '--setenv', 'GIT_TERMINAL_PROMPT', '0',
-                '/usr/bin/git', '-C', '/work', 'ls-remote', '--exit-code', remote, merge]
-            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                '/usr/bin/git', '-c', 'core.sshCommand=/run/focodex/ssh-wrapper',
+                '-C', '/work', 'ls-remote', '--exit-code', remote, merge]
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 start_new_session=True, env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent', 'LC_ALL': 'C.UTF-8'})
             try: process.wait(timeout=TIMEOUT)
             except subprocess.TimeoutExpired as error:
                 os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=3)
+                write_remote_diagnostic({'event': 'ssh-probe', 'outcome': 'timeout',
+                                         'relayAccepted': proxy.client_connected,
+                                         'targetConnected': proxy.target_connected,
+                                         'proxyStatus': proxy_status_value(status_file)})
                 raise git_ops.UncertainGit('読み取り専用SSH接続試験が時間切れです。') from error
+            git_stderr = process.stderr.read(4096) if process.stderr else b''
+            try:
+                ssh_stderr = stderr_file.read_bytes()[:4096]
+            except OSError:
+                ssh_stderr = b''
+            stderr = ssh_stderr + b'\n' + git_stderr
+            proxy_status = proxy_status_value(status_file)
+            # If SSH failed before its ProxyCommand connected, do not leave the
+            # one-shot relay waiting until its independent accept timeout.
+            proxy.close()
             thread.join(3)
-            if thread.is_alive(): raise git_ops.UncertainGit('SSH中継の終了確認に失敗しました。')
-            if process.returncode or errors: raise ValueError('読み取り専用SSH接続試験に失敗しました。')
+            if thread.is_alive():
+                write_remote_diagnostic({'event': 'ssh-probe', 'outcome': 'relay-exit-unconfirmed',
+                                         'returnCode': process.returncode,
+                                         'relayAccepted': proxy.client_connected,
+                                         'targetConnected': proxy.target_connected, 'proxyStatus': proxy_status})
+                raise git_ops.UncertainGit('SSH中継の終了確認に失敗しました。')
+            if errors:
+                # The fixed relay reached the only place that can open a TCP
+                # connection.  Do not include its exception: it may contain
+                # host or socket details, but distinguish it from SSH auth.
+                write_remote_diagnostic({'event': 'ssh-probe', 'outcome': 'relay-error',
+                                         'returnCode': process.returncode,
+                                         'relayAccepted': proxy.client_connected,
+                                         'targetConnected': proxy.target_connected, 'proxyStatus': proxy_status})
+                raise ValueError('読み取り専用SSH接続試験に失敗しました。固定宛先への中継接続を確認してください。')
+            if process.returncode:
+                write_remote_diagnostic({'event': 'ssh-probe', 'outcome': 'ssh-error',
+                                         'returnCode': process.returncode,
+                                         'relayAccepted': proxy.client_connected,
+                                         'targetConnected': proxy.target_connected, 'proxyStatus': proxy_status,
+                                         'classification': ssh_probe_classification(stderr, process.returncode)})
+                raise ValueError(ssh_probe_error(stderr, process.returncode))
+            write_remote_diagnostic({'event': 'ssh-probe', 'outcome': 'passed', 'returnCode': 0,
+                                     'relayAccepted': proxy.client_connected,
+                                     'targetConnected': proxy.target_connected, 'proxyStatus': proxy_status})
     return {'ssh': 'passed', 'readOnly': True, 'networkShared': False}
 
 
 def _relay_once(proxy, errors):
     try: proxy.serve_once()
     except Exception as error: errors.append(error)
+
+
+def ssh_probe_classification(stderr, returncode=None):
+    """Stable categories for the private summary log; no SSH text is retained."""
+    detail = stderr.lower()
+    if b'focodex_proxy_connect_failed' in detail:
+        return 'proxy-connect'
+    if b'executing proxy command' in detail:
+        return 'proxy-command'
+    if b'connecting to ' in detail:
+        return 'proxy-bypassed'
+    if b'bad configuration option' in detail or b'unknown option' in detail or b'illegal option' in detail:
+        return 'ssh-config'
+    if returncode == 2:
+        return 'upstream-ref'
+    if b'host key verification' in detail or b'no matching host key type' in detail:
+        return 'host-key'
+    if b'permission denied' in detail or b'agent refused operation' in detail:
+        return 'agent-auth'
+    if (b'repository not found' in detail or b'could not read from remote repository' in detail or
+            b'permission to ' in detail):
+        return 'repository-access'
+    if (b'connection timed out' in detail or b'connection refused' in detail or b'could not resolve' in detail or
+            b'connection reset' in detail or b'connection closed' in detail or b'kex_exchange' in detail):
+        return 'target-connection'
+    if b'askpass' in detail or b'agent' in detail:
+        return 'agent-setup'
+    return 'unclassified'
+
+
+def ssh_probe_error(stderr, returncode=None):
+    """Classify SSH's bounded stderr without exposing host, URL, or key data."""
+    classification = ssh_probe_classification(stderr, returncode)
+    # git ls-remote --exit-code reserves 2 for a reachable remote that has no
+    # matching ref.  This is not an SSH transport failure.
+    if classification == 'upstream-ref':
+        return '読み取り専用SSH接続試験に失敗しました。upstreamの追跡ブランチを確認してください。'
+    if classification == 'proxy-connect':
+        return '読み取り専用SSH接続試験に失敗しました。Sandbox内の固定中継ソケットを確認してください。'
+    if classification == 'proxy-command':
+        return '読み取り専用SSH接続試験に失敗しました。固定中継でのSSH接続を確認してください。'
+    if classification == 'proxy-bypassed':
+        return '読み取り専用SSH接続試験に失敗しました。固定中継設定が適用されていません。'
+    if classification == 'ssh-config':
+        return '読み取り専用SSH接続試験に失敗しました。固定SSH設定を確認してください。'
+    if classification == 'host-key':
+        return '読み取り専用SSH接続試験に失敗しました。接続先の既知鍵を確認してください。'
+    if classification == 'agent-auth':
+        return '読み取り専用SSH接続試験に失敗しました。専用Agentの鍵または接続先制約を確認してください。'
+    if classification == 'repository-access':
+        return '読み取り専用SSH接続試験に失敗しました。GitHub上のリポジトリアクセスを確認してください。'
+    if classification == 'target-connection':
+        return '読み取り専用SSH接続試験に失敗しました。固定宛先への接続を確認してください。'
+    if classification == 'agent-setup':
+        return '読み取り専用SSH接続試験に失敗しました。専用Agentの認証準備を確認してください。'
+    return '読み取り専用SSH接続試験に失敗しました。SSHまたは固定中継を確認してください。'

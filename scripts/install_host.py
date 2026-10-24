@@ -26,6 +26,9 @@ def install(home, codex):
     remote_module = target / 'git_remote.py'
     shutil.copyfile(ROOT / 'native_host/git_remote.py', remote_module)
     remote_module.chmod(0o600)
+    agent_module = target / 'remote_agent.py'
+    shutil.copyfile(ROOT / 'native_host/remote_agent.py', agent_module)
+    agent_module.chmod(0o700)
     launcher = target / 'launch'
     # JSON quoting is not shell escaping. Quote executable paths with shlex.
     import shlex
@@ -47,7 +50,14 @@ def install(home, codex):
         'path': str(launcher), 'type': 'stdio',
         'allowed_extensions': ['focodex@foxbook.example']}, indent=2) + '\n')
     manifest.chmod(0o600)
-    print(f'Host登録: {manifest}\n設定（既存は保持）: {config}')
+    unit = home / '.config/systemd/user/focodex-remote-agent.service'
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / 'systemd/focodex-remote-agent.service', unit)
+    unit.chmod(0o600)
+    key_unit = home / '.config/systemd/user/focodex-remote-key.service'
+    shutil.copyfile(ROOT / 'systemd/focodex-remote-key.service', key_unit)
+    key_unit.chmod(0o600)
+    print(f'Host登録: {manifest}\n設定（既存は保持）: {config}\n専用Agent unit（未有効化）: {unit}\n鍵登録unit（未有効化）: {key_unit}')
 
 
 if __name__ == '__main__':

@@ -1,0 +1,11 @@
+[Unit]
+Description=Register the fixed Focodex key in its dedicated SSH Agent
+Requires=focodex-remote-agent.service
+After=focodex-remote-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/lib/focodex/remote_agent.py register
+
+# This unit is intentionally not enabled by the installer.  It must be bound
+# to the verified graphical session only after Surface testing.

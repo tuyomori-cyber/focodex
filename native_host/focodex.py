@@ -143,10 +143,10 @@ def git_remote_preflight(project):
     ref, _ = repo.branch()
     remote, merge, _target = git_remote.upstream_ssh_remote(repo)
     upstream = remote + '/' + merge.removeprefix('refs/heads/')
-    agent = os.environ.get('SSH_AUTH_SOCK')
     try:
-        agent_available = bool(agent) and stat.S_ISSOCK(os.stat(agent).st_mode)
-    except OSError:
+        git_remote.dedicated_agent_socket()
+        agent_available = True
+    except ValueError:
         agent_available = False
     return {'branch': ref, 'upstream': upstream, 'sshAgentAvailable': agent_available,
             'bwrapAvailable': Path('/usr/bin/bwrap').is_file(),
