@@ -109,6 +109,6 @@ SurfaceのSELinux `Enforcing` 環境では、ネットワークを共有しな�
 
 この候補はまだ採用決定ではない。特に、Host側中継の接続先固定、DNSとSSHホスト鍵の扱い、専用Agentを作る運用、Sandbox内SSHへの固定ソケット接続の渡し方を、小さな読み取り専用試験で確認する必要がある。既存の共有Agentを直接Sandboxへ渡しただけで、鍵や宛先が制限されたとは扱わない。
 
-実施済みの段階的確認として、通信なしSandbox、Host固定ループバック中継、専用AgentのNative Host継承、対象ホストの既知鍵存在、SSH URLの許可形式への限定を確認した。再起動後の専用Agent復元と固定鍵の自動登録も実装・Surface確認済みである。一方、Focodex画面の厳格に解析した実upstreamへのSSH接続は、固定SSHラッパー後に中継未到達で未成功である。最新の実機事実と調査制約は[読み取り専用SSH接続試験 引継ぎ記録](Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md)を参照する。Fetch、Pull、Pushは未実装・未実行である。
+実施済みの段階的確認として、通信なしSandbox、Host固定ループバック中継、専用AgentのNative Host継承、対象ホストの既知鍵存在、SSH URLの許可形式への限定を確認した。再起動後の専用Agent復元と固定鍵の自動登録も実装・Surface確認済みである。さらに、Focodex画面から厳格に解析した実upstreamへの`ls-remote`が成功し、安全な診断で`outcome=passed`、`wrapperStatus=exited`、`proxyStatus=connected`、中継・固定宛先接続の成功を確認した。Fetch、Pull、Pushは引き続き未実装・未実行であり、次はこの通信経路を再利用するFetch単独の設計・検証とする。最新の実機事実と制約は[読み取り専用SSH接続試験 引継ぎ記録](Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md)を参照する。
 
 ※本書は会話で合意した運用方針を整理した設計案であり、Sandboxの安全性や実装可能性を検証済みとするものではない。

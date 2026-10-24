@@ -247,6 +247,14 @@ class GitTests(unittest.TestCase):
         self.assertNotIn('SSH_AUTH_SOCK', args)
         self.assertNotIn('/run/focodex/agent.sock', args)
 
+    def test_fetch_sandbox_exposes_git_dir_but_not_worktree(self):
+        args = git_remote.fetch_sandbox_arguments(self.repo, self.repo / '.git')
+        self.assertIn('--unshare-all', args)
+        self.assertIn(str((self.repo / '.git').resolve()), args)
+        self.assertIn('/work/.git', args)
+        self.assertNotIn(str(self.repo), args)
+        self.assertNotIn('--share-net', args)
+
     def test_minimal_passwd_exposes_only_a_synthetic_current_user(self):
         self.assertEqual(git_remote.minimal_passwd(),
                          f'focodex:x:{os.geteuid()}:{os.getegid()}:Focodex:/nonexistent:/sbin/nologin\n'.encode())
@@ -306,7 +314,7 @@ class GitTests(unittest.TestCase):
         self.assertIn('Port 2222', config)
         self.assertIn('ProxyCommand /usr/bin/python3 /run/focodex/ssh_proxy.py /run/focodex/transport.sock /run/focodex/proxy-status', config)
         wrapper = git_remote.fixed_ssh_wrapper(target)
-        self.assertIn('exec /usr/bin/ssh -vv', wrapper)
+        self.assertIn('/usr/bin/ssh -vv', wrapper)
         self.assertIn('-o HostName=example.test', wrapper)
         self.assertIn("-o 'ProxyCommand=/usr/bin/python3 /run/focodex/ssh_proxy.py", wrapper)
         self.assertIn('2>/run/focodex/ssh-stderr', wrapper)
@@ -337,14 +345,29 @@ class GitTests(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text()), event)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_pull_diagnostic_is_private_fixed_summary(self):
+        with tempfile.TemporaryDirectory() as state, mock.patch.dict(os.environ, {'XDG_STATE_HOME': state}):
+            event = {'event': 'pull', 'outcome': 'passed', 'returnCode': 0}
+            git_remote.write_remote_diagnostic(event)
+            path = Path(state) / 'focodex' / 'remote-ssh-diagnostics.jsonl'
+            self.assertEqual(json.loads(path.read_text()), event)
+
     def test_proxy_status_is_limited_to_fixed_values(self):
         marker = self.root / 'status'
         marker.write_text('connected')
         self.assertEqual(git_remote.proxy_status_value(marker), 'connected')
         marker.write_text('wrapper-command')
-        self.assertEqual(git_remote.proxy_status_value(marker), 'wrapper-command')
+        self.assertEqual(git_remote.proxy_status_value(marker), 'invalid')
         marker.write_text('github.com')
         self.assertEqual(git_remote.proxy_status_value(marker), 'invalid')
+
+    def test_wrapper_status_is_limited_to_fixed_values(self):
+        marker = self.root / 'wrapper-status'
+        marker.write_text('command')
+        self.assertEqual(git_remote.wrapper_status_value(marker), 'command')
+        marker.write_text('connected')
+        self.assertEqual(git_remote.wrapper_status_value(marker), 'invalid')
+        self.assertEqual(git_remote.wrapper_status_value(self.root / 'missing'), 'unavailable')
 
     def test_ssh_proxy_script_writes_each_received_chunk_completely(self):
         # The script is generated into the isolated sandbox at runtime.  Keep

@@ -10,7 +10,7 @@ class Element {
   append(...options) { this.options.push(...options); if (this.options.length === options.length) this.value = options[0]?.value; }
   setAttribute() {}
 }
-const elements = Object.fromEntries(['connect', 'manage-workspaces', 'help', 'help-panel', 'workspace-manager', 'manager-workspace', 'editing-workspace', 'discovery-root', 'new-discovery-root', 'add-discovery-root', 'scan-repositories', 'manager-message', 'repository-results', 'workspace-name-field', 'workspace-name', 'manager-default-project', 'save-workspace', 'delete-workspace', 'workspace-choice', 'workspace', 'workspace-members', 'project', 'model', 'refresh-models', 'prompt', 'form', 'run', 'stop', 'status', 'diagnostics', 'interaction', 'interaction-title', 'interaction-details', 'approval-view', 'operation-label', 'operation-text', 'operation-cwd', 'approval-reason', 'approval-scope', 'approval-warning', 'questions', 'approve', 'decline', 'answer-question', 'answer', 'info', 'response-panel', 'diff-panel', 'git-refresh', 'git-remote-preflight', 'git-remote-sandbox-probe', 'git-remote-relay-probe', 'git-remote-ssh-probe', 'git-message', 'git-files', 'git-project', 'git-stage', 'commit-message', 'git-review', 'git-commit', 'git-cancel-review', 'commit-review', 'commit-target', 'commit-summary', 'commit-files', 'commit-confirm-message', 'commit-details', 'commit-internal', 'commit-diff'].map(id => [id, new Element()]));
+const elements = Object.fromEntries(['connect', 'manage-workspaces', 'help', 'help-panel', 'workspace-manager', 'manager-workspace', 'editing-workspace', 'discovery-root', 'new-discovery-root', 'add-discovery-root', 'scan-repositories', 'manager-message', 'repository-results', 'workspace-name-field', 'workspace-name', 'manager-default-project', 'save-workspace', 'delete-workspace', 'workspace-choice', 'workspace', 'workspace-members', 'project', 'model', 'refresh-models', 'prompt', 'form', 'run', 'stop', 'status', 'diagnostics', 'interaction', 'interaction-title', 'interaction-details', 'approval-view', 'operation-label', 'operation-text', 'operation-cwd', 'approval-reason', 'approval-scope', 'approval-warning', 'questions', 'approve', 'decline', 'answer-question', 'answer', 'info', 'response-panel', 'diff-panel', 'git-refresh', 'git-remote-preflight', 'git-remote-sandbox-probe', 'git-remote-relay-probe', 'git-remote-ssh-probe', 'git-fetch', 'git-pull', 'git-message', 'git-files', 'git-project', 'git-stage', 'commit-message', 'git-review', 'git-commit', 'git-cancel-review', 'commit-review', 'commit-target', 'commit-summary', 'commit-files', 'commit-confirm-message', 'commit-details', 'commit-internal', 'commit-diff'].map(id => [id, new Element()]));
 elements.prompt.value = '接続確認';
 elements['workspace-manager'].hidden = true;
 elements['help-panel'].hidden = true;
@@ -85,6 +85,15 @@ reply({type: 'git_remote_preflight', id: sent.at(-1).id, branch: 'refs/heads/mai
 assert.match(elements['git-message'].textContent, /通常SSH Agent=利用可能/);
 assert.match(elements['git-message'].textContent, /Focodex専用Agent=設定済み・鍵あり/);
 assert.equal(elements['git-files'].options.length, 0, '診断後はGit状態を再取得する');
+elements['git-fetch'].fire('click');
+assert.equal(sent.at(-1).type, 'git_fetch');
+reply({type: 'git_fetch', id: sent.at(-1).id, fetch: 'passed', branch: 'refs/heads/main', upstream: 'origin/main'});
+assert.match(elements['git-message'].textContent, /Fetch完了/);
+assert.match(elements['git-message'].textContent, /作業ツリーとインデックスは変更していません/);
+elements['git-pull'].fire('click');
+assert.equal(sent.at(-1).type, 'git_pull');
+reply({type: 'git_pull', id: sent.at(-1).id, pull: 'upToDate', branch: 'refs/heads/main', upstream: 'origin/main'});
+assert.match(elements['git-message'].textContent, /Pull不要/);
 elements['git-remote-sandbox-probe'].fire('click');
 assert.equal(sent.at(-1).type, 'git_remote_sandbox_probe');
 reply({type: 'git_remote_sandbox_probe', id: sent.at(-1).id, sandbox: 'passed', networkShared: false,

@@ -1,8 +1,8 @@
 # Focodex 読み取り専用SSH接続試験 引継ぎ記録
 
 更新日：2026-10-24  
-開発移管先：Surface実機のCodex CLI  
-状態：**未解決。Fetch / Pull / Pushは禁止を継続する。**
+開発移管先：第3段階のFetch設計・実装
+状態：**解決済み。読み取り専用SSH接続試験は成功。Fetch / Pull / Pushは未実装・未実行のまま。**
 
 ## 目的と不変条件
 
@@ -26,24 +26,24 @@
 | リポジトリ / ブランチ | 同Agent・隔離Git環境で直接実行した`git ls-remote --exit-code origin refs/heads/main`が成功 |
 | Focodex事前診断 | branch=`main`、upstream=`origin/main`、専用Agent・bwrap/Git/SSHは利用可能 |
 | 中継事前試験 | ネットワーク非共有SandboxからHost固定ループバック宛先へのUnixソケット中継が成功 |
+| Focodex実upstream試験 | 画面の読み取り専用SSH接続試験が成功。安全な診断は`outcome=passed`、`returnCode=0`、`relayAccepted=true`、`targetConnected=true`、`wrapperStatus=exited`、`proxyStatus=connected` |
 
-上記により、GitHub鍵、リポジトリアクセス、upstream、専用Agent、隔離Git環境、基本中継は原因ではないことを確認した。
+上記により、GitHub鍵、リポジトリアクセス、upstream、専用Agent、隔離Git環境、固定中継、Focodex経由の実接続がすべて成立することを確認した。
 
-## 未解決の実機結果
+## 実upstream試験の成功
 
-Focodex画面の「読み取り専用SSH接続試験」は失敗し、画面には安全な一般エラーとして「GitHub上のリポジトリアクセスを確認してください」と出る。これは実際のGitHub権限失敗を確定する文言ではない。
-
-最新の安全な診断記録は次のとおりである。
+Focodex画面の「読み取り専用SSH接続試験」は成功した。最新の安全な診断記録は次のとおりである。
 
 ```json
-{"classification":"repository-access","event":"ssh-probe","outcome":"ssh-error","proxyStatus":"wrapper-command","relayAccepted":false,"returnCode":128,"targetConnected":false}
+{"event":"ssh-probe","outcome":"passed","proxyStatus":"connected","relayAccepted":true,"returnCode":0,"targetConnected":true,"wrapperStatus":"exited"}
 ```
 
-意味は以下である。
+- `wrapperStatus=exited`: 固定SSHラッパーがSSHを起動し、終了状態を確認した。
+- `proxyStatus=connected`: ProxyCommandが固定Unixソケットへ接続した。
+- `relayAccepted=true` / `targetConnected=true`: Host中継がSandboxからの接続を受理し、固定宛先へのTCP接続を開始した。
+- `returnCode=0`: `git ls-remote --exit-code origin refs/heads/main`が成功した。
 
-- `wrapper-command`: Gitが固定SSHラッパーを実接続として起動した。
-- `relayAccepted=false` / `targetConnected=false`: `FixedTargetProxy`はSandboxから接続を受けておらず、固定宛先TCP接続も開始していない。
-- `classification=repository-access`: Gitの一般的な終了文から得た分類であり、直接試験の成功と矛盾するため根本原因とは扱わない。
+この試験は読み取り専用であり、Fetch、Pull、Push、参照・作業ツリーの変更は実行していない。以後の作業は、固定済み経路を再利用するFetch単独の安全設計・実装とする。
 
 ## 現在の実装と診断
 
@@ -51,20 +51,19 @@ Focodex画面の「読み取り専用SSH接続試験」は失敗し、画面に�
 
 - `readonly_ssh_probe()`が一時のknown_hosts、SSHラッパー、ProxyCommand、専用AgentソケットをSandboxへ限定公開する。
 - Gitには`-c core.sshCommand=/run/focodex/ssh-wrapper`と`GIT_SSH_COMMAND=/run/focodex/ssh-wrapper`を固定して渡す。
-- ラッパーは固定SSHオプションとProxyCommandを指定する。
-- ProxyCommandの段階は`proxy-status`へ固定値だけを書き、Hostが`proxyStatus`として診断ログへ記録する。
+- ラッパーは固定SSHオプションとProxyCommandを指定し、ラッパー自身とProxyCommandの段階を別々の固定値で記録する。
 - SSHの標準エラーは一時専用ファイルでHostが分類する。本文を画面・永続ログへ保存しない。
 - 永続診断ログは`~/.local/state/focodex/remote-ssh-diagnostics.jsonl`。mode `0600`、親ディレクトリは本人所有`0700`。保存するのは終了コード・固定分類・中継段階だけである。
 
-Xubuntu作業ツリーでは`python3 -m unittest tests/test_git_ops.py -v`が37件成功している。Surfaceで作業を始める前に差分を確認し、既存の未コミット作業を破棄・上書きしない。
+Xubuntu作業ツリーでは、追加診断に関する6件の回帰試験とPython構文確認が成功している。Surfaceで作業を始める前に差分を確認し、既存の未コミット作業を破棄・上書きしない。
 
 ## Surface Codex CLIでの最初の作業
 
 1. この文書、`TODO.md`、`docs/verification.md`、`specification/Focodex_専用SSH認証管理設計案.md`を読む。
 2. `git status --short`と`git diff --check`で引継ぎ時点の差分を確認する。reset・checkout・ログ削除はしない。
-3. `python3 -m unittest tests/test_git_ops.py -v`を実行して、現在の37件の基準を確認する。
-4. 実機再試験を繰り返す前に、`wrapper-command`なのにProxyCommandが開始されない経路を、Host内で安全に再現・追跡する。追加診断はホスト・URL・鍵・パスフレーズ・生のSSH出力を永続化しないこと。
-5. 読み取り専用SSH試験が画面で成功するまで、Fetch / Pull / Pushを実装・実行しない。
+3. `python3 -m unittest tests/test_git_ops.py -v`を実行して、Git回帰試験全体の基準を確認する。
+4. 読み取り専用SSH接続が成功した固定経路を前提に、Fetch時に許可するGit設定・書込範囲・参照更新の原子性を設計する。追加診断はホスト・URL・鍵・パスフレーズ・生のSSH出力を永続化しないこと。
+5. Fetch単独の安全設計・実装・実機検証が済むまで、Pull / Pushを実装・実行しない。
 
 ## 関連文書
 

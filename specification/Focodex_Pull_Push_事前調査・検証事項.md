@@ -1,7 +1,7 @@
 # Focodex Pull・Push 事前調査・検証事項
 
 作成日: 2026-10-23  
-状態: 調査中（開発機の非破壊確認のみ完了、Surface未確認）  
+状態: 調査中（Surfaceで読み取り専用の実upstream接続まで確認、Fetch/Pull/Pushは未実装・未実行）
 関連文書: `Focodex_Pull_Push_実装設計.md`
 
 ## 1. 調査目的
@@ -13,8 +13,8 @@ Pull・PushをGit CLI＋専用Sandboxで安全に単純実装できるか、Surf
 ### A. Gitリモートの現状把握
 
 - [ ] 対象リポジトリの`git remote -v`、`git branch -vv`、`git config --get-regexp '^(branch\.|remote\.|push\.)'`を確認する（機密情報を含むURLは記録時にマスク）。
-- [ ] SSH/HTTPSのどちらを使用しているかを確定する。
-- [ ] ローカルブランチのupstreamが設定され、Push先を一意に決定できるか確認する。
+- [x] SSH/HTTPSのどちらを使用しているかを確定する。対象は明示的な`ssh://`形式だけを許可する。
+- [x] ローカルブランチのupstreamが設定され、Push先を一意に決定できるか確認する。読み取り専用試験では`main` / `origin/main`を確認した。
 - [ ] SSH接続でSurface上のGit CLIから`git fetch`および通常Pushが成功することを確認する。
 
 ### B. Firefox Native Hostとの環境差
@@ -34,6 +34,8 @@ Pull・PushをGit CLI＋専用Sandboxで安全に単純実装できるか、Surf
 - [ ] 認証情報・ソケットがCodex実行環境に流入しないことを確認する。
 
 **判定条件:** Native Hostから起動したSandbox内で、対話操作なしに許可済みリモートへ安全にFetch/Pushできる方式が見つかること。成立しなければPull・Push実装を保留し、CLI運用を続ける。
+
+2026-10-24に、この判定に先行する読み取り専用ゲートとして、Focodex画面から固定された実upstreamへの`git ls-remote --exit-code origin refs/heads/main`が成功した。安全な診断では`outcome=passed`、`returnCode=0`、`relayAccepted=true`、`targetConnected=true`、`wrapperStatus=exited`、`proxyStatus=connected`を確認した。この結果はFetch/Pushの成功を意味せず、以後は第4節のFetch試験を最初の変更操作として設計・実装する。
 
 ## 3. Sandbox・Git設定の安全性
 
@@ -191,7 +193,7 @@ SurfaceのFirefox/Cageで「中継事前試験」が成功した。これはSand
 
 専用一時Agentについては、Firefox Native Hostの「リモート事前診断」で利用可能を確認した。端末側でも専用ソケットとAgent内鍵が利用可能であることを確認した。対象ホストの既知鍵は`ssh-keygen -F`で存在を確認したが、ホスト名・鍵・URLは記録していない。
 
-Host側には対象ホストの一致行だけを抽出する`known_host_entries()`、および専用known_hosts・厳格なホスト鍵照合・非対話認証・鍵ファイル探索禁止を指定する固定SSH設定を追加した。さらにupstreamのリモートURLは、明示的な`ssh://user@host[:port]/path`形式だけを受理する解析器を追加した。scp形式、暗黙のユーザー名、IPリテラル、query/fragment、複数URL、`pushurl`は拒否する。解析結果のURL・host・user・pathは拡張へ返さない。固定構成を統合した`ls-remote`限定の読み取り専用SSH接続試験を実装し、Host・画面回帰試験は成功した。Surfaceでは一時的に手動作成した専用Agentと画面表示を確認したが、終了未確認の安全停止中のため実upstreamへの試験は未実行である。
+Host側には対象ホストの一致行だけを抽出する`known_host_entries()`、および専用known_hosts・厳格なホスト鍵照合・非対話認証・鍵ファイル探索禁止を指定する固定SSH設定を追加した。さらにupstreamのリモートURLは、明示的な`ssh://user@host[:port]/path`形式だけを受理する解析器を追加した。scp形式、暗黙のユーザー名、IPリテラル、query/fragment、複数URL、`pushurl`は拒否する。解析結果のURL・host・user・pathは拡張へ返さない。固定構成を統合した`ls-remote`限定の読み取り専用SSH接続試験を実装し、Host・画面回帰試験は成功した。この時点では、終了未確認の安全停止中のため実upstreamへの試験を保留していた。
 
 ### 2026-10-24：GNOME Keyring自動解除と認証経路の現状
 
@@ -199,4 +201,8 @@ GDM/PAMによりGNOME KeyringのLoginコレクションが自動解除される�
 
 この成功は鍵保管庫までであり、SSH鍵のパスフレーズ取得、専用Agentの起動、鍵の登録は未実装である。Hostの既定ソケットは`$XDG_RUNTIME_DIR/focodex/remote-agent.sock`であり、認証管理コンポーネントもこのパスへ専用Agentを作成しなければならない。OS再起動後は、当該コンポーネントの再起動試験と終了未確認記録の解除、`origin`の明示SSH URL化を確認した後にのみ実upstreamへの読み取り専用試験を再開する。
 
-※本書は実施前のチェックリストであり、記載事項は検証済みの結果ではない。
+### 2026-10-24：読み取り専用実upstream接続の成功
+
+終了未確認状態を解消し、明示SSH URL・専用Agent・最小known_hosts・固定Unixソケット中継を用いて、Focodex画面から実upstreamへの`git ls-remote --exit-code origin refs/heads/main`が成功した。安全な診断は`outcome=passed`、`returnCode=0`、`relayAccepted=true`、`targetConnected=true`、`wrapperStatus=exited`、`proxyStatus=connected`である。Fetch、Pull、Push、参照・作業ツリーの変更は行っておらず、次は第4節のFetch単独試験を設計・実装する。
+
+※本書はPull・Push実装前のチェックリストであり、未チェック項目は検証済みの結果ではない。

@@ -737,7 +737,7 @@ class Host:
         if value.get('type') == 'respond':
             self.respond(value)
             return
-        if value.get('type') in ('git_snapshot', 'git_stage', 'git_review', 'git_commit', 'git_remote_preflight', 'git_remote_sandbox_probe', 'git_remote_relay_probe', 'git_remote_ssh_probe'):
+        if value.get('type') in ('git_snapshot', 'git_stage', 'git_review', 'git_commit', 'git_remote_preflight', 'git_remote_sandbox_probe', 'git_remote_relay_probe', 'git_remote_ssh_probe', 'git_fetch', 'git_pull'):
             self.git_command(value)
             return
         if value.get('type') not in ('run', 'models'):
@@ -807,7 +807,7 @@ class Host:
 
     def git_command(self, value):
         operation = value['type']
-        fields = {'git_snapshot': set(), 'git_remote_preflight': set(), 'git_remote_sandbox_probe': set(), 'git_remote_relay_probe': set(), 'git_remote_ssh_probe': set(), 'git_stage': {'files', 'snapshotToken'},
+        fields = {'git_snapshot': set(), 'git_remote_preflight': set(), 'git_remote_sandbox_probe': set(), 'git_remote_relay_probe': set(), 'git_remote_ssh_probe': set(), 'git_fetch': set(), 'git_pull': set(), 'git_stage': {'files', 'snapshotToken'},
                   'git_review': {'message'}, 'git_commit': {'reviewToken'}}
         if set(value) - ({'type', 'id', 'projectId', 'workspaceId'} | fields[operation]):
             raise ValueError('未対応のGit引数です。')
@@ -870,6 +870,13 @@ class Host:
                     self.git_snapshots.pop(key, None)
                     self.git_reviews.pop(key, None)
                     result = git_remote.readonly_ssh_probe(project)
+                elif operation == 'git_fetch':
+                    self.git_snapshots.pop(key, None)
+                    self.git_reviews.pop(key, None)
+                    result = git_remote.fetch_upstream(project)
+                elif operation == 'git_pull':
+                    self.git_snapshots.pop(key, None); self.git_reviews.pop(key, None)
+                    result = git_remote.pull_upstream(project)
                 elif operation == 'git_stage':
                     snapshot = self.git_snapshots.pop(key, None)
                     self.git_reviews.pop(key, None)

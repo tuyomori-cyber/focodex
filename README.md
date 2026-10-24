@@ -75,7 +75,7 @@ Native Hostは実行ID、Codex要求に紐付けた一時ID、項目ID、スレ�
 
 Firefoxを再起動すると一時拡張は再読み込みが必要。拡張コードの変更後も`about:debugging`から再読み込みする。
 
-画面下部の「Git・差分・Commit」では、選択中のプロジェクトについて「Git状態を取得」を押すと、変更ファイル名を一覧表示する。各ファイル名をタップすると、そのファイルの未ステージ・未追跡差分とステージ済み差分を開く。Codex App Serverを経由せず、Native HostがGit状態取得、選択的ステージ、最終確認、Commitを実行する。通常リポジトリとGit worktreeを扱い、Git管理ディレクトリの実体を確認する。Codex実行中は取得しない。外部ヘルパーを設定したリポジトリや表示上限を超える差分はエラーにする。未追跡ファイルのプレビューはプロジェクト内の通常ファイルかつUTF-8テキストに限り、1ファイル10万バイトまで表示する。更新Hostを再登録後、Firefoxで状態取得、Stage、Commit最終確認、Commit、再取得を確認済みである。Pull・Push・fetchは未提供で、現在はリモート事前診断と通信境界の検証だけを提供する。
+画面下部の「Git・差分・Commit」では、選択中のプロジェクトについて「Git状態を取得」を押すと、変更ファイル名を一覧表示する。各ファイル名をタップすると、そのファイルの未ステージ・未追跡差分とステージ済み差分を開く。Codex App Serverを経由せず、Native HostがGit状態取得、選択的ステージ、最終確認、Commitを実行する。通常リポジトリとGit worktreeを扱い、Git管理ディレクトリの実体を確認する。Codex実行中は取得しない。外部ヘルパーを設定したリポジトリや表示上限を超える差分はエラーにする。未追跡ファイルのプレビューはプロジェクト内の通常ファイルかつUTF-8テキストに限り、1ファイル10万バイトまで表示する。更新Hostを再登録後、Firefoxで状態取得、Stage、Commit最終確認、Commit、再取得を確認済みである。リモート事前診断と、固定宛先・最小known_hosts・専用Agent・一接続中継を使う読み取り専用SSH接続試験を提供し、Surfaceで実upstreamへの`ls-remote`成功を確認済みである。Fetchは通常リポジトリ向けの初期実装を追加したが、Surface実機では未検証である。Pull・Pushは未提供である。
 
 ## permission profileの適用状態と確認結果
 
@@ -122,7 +122,7 @@ SurfaceのFedoraではまだFocodexのpermission profileを試していない。
 - 実行記録は専用プロセス群の消滅を確認した場合にだけ削除する。HostのSIGKILL・終了確認失敗・起動中の障害では記録を残す。FirefoxやHostの再起動、PIDが見当たらないことだけでは解除しない。正常な記録はOS再起動後、Linux boot IDの変化を照合して解除する。記録を手動削除して迂回しない。破損記録は再起動しても自動解除せず、個別調査が必要。
 - 接続断・通常のHost終了・180秒の時間切れで、専用プロセス群へTERMを送り、1秒後も残る場合はKILLする。既存のファイル変更は戻さない。
 - 停止ボタンは`turn/interrupt`を送り、5秒以内に中断結果が来なければ専用プロセス群を終了する。終了確認後にのみ停止済みと表示する。
-- 追加質問への実応答、スリープを含む停止管理、音声エディタ連携の実機検証は残っている。第2段階のStatus・選択的ステージ・固定treeの確認・Commit・Commit欄への明示反映を実装・Firefoxで確認済み。設定規則と方式は[第2段階設計](specification/Git第2段階設計提案.md)を参照。Pull・Push・fetchは未提供であり、通信境界を検証してから第3段階として扱う。
+- 追加質問への実応答、スリープを含む停止管理、音声エディタ連携の実機検証は残っている。第2段階のStatus・選択的ステージ・固定treeの確認・Commit・Commit欄への明示反映を実装・Firefoxで確認済み。設定規則と方式は[第2段階設計](specification/Git第2段階設計提案.md)を参照。Pull・Push・fetchは未提供である。第3段階の通信境界として、Surfaceで読み取り専用SSH接続試験を成功させたため、次はFetch単独を設計・検証する。
 - 応答は完了したagentMessageを本文として保持する。合計16万文字超はエラーにする。逐次ログ・生のプロトコルイベントは通常表示しない。
 
 ## ブラウザを使わないHost試験
@@ -184,7 +184,7 @@ node tests/test_draft.mjs
 
 確認したtreeだけをCommitし、作業ツリーの追加編集を混入させない。実インデックスを自動resetせず、ブランチを切り替えたり、競合を自動解消したりしない。Pull・Push・fetchは提供しない。
 
-リモートGitは、固定宛先・最小known_hosts・専用Agent・一接続中継を使う読み取り専用SSH接続試験まで実装済みで、実upstreamには未接続である。GDM/PAMによるGNOME Keyringの自動解除はSurfaceで確認済みだが、専用Agentを再起動後に復元して鍵を自動登録する機能は未実装である。詳細と再開条件は[Pull・Push事前調査・検証事項](specification/Focodex_Pull_Push_事前調査・検証事項.md)および[GNOME Keyring調査記録](specification/foxbook_GNOME_Keyring_調査記録_2026-10-24.md)を参照する。
+リモートGitは、固定宛先・最小known_hosts・専用Agent・一接続中継を使う読み取り専用SSH接続試験まで実装済みで、SurfaceのFocodex画面から実upstreamへの`ls-remote`成功を確認した。GDM/PAMによるGNOME Keyringの自動解除、再起動後の専用Agent復元、固定鍵の自動登録もSurfaceで確認済みである。Fetch、Pull、Pushは未実装・未実行であり、詳細と次の設計条件は[Pull・Push事前調査・検証事項](specification/Focodex_Pull_Push_事前調査・検証事項.md)および[読み取り専用SSH接続試験 引継ぎ記録](specification/Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md)を参照する。
 
 初版は表示可能なUTF-8テキスト、通常ファイル、index v2/v3が対象。バイナリCommit、リンク・submodule・sparse/split index、進行中のmerge/rebase、detached HEADなどは拒否する。外部フィルター・include等の設定や非対応の属性があれば、理由を表示して操作を止める。フックと署名は無効化し、認証ヘルパーや通信操作は呼び出さない。設定は自動修正しない。
 

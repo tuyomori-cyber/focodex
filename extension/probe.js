@@ -323,7 +323,7 @@ function fetchModels() {
 function gitRequest(type, payload = {}) {
   if (!port || busy || !$("git-project").value || managerRequestId) return;
   pendingId = crypto.randomUUID(); pendingKind = type; busy = true;
-  $("git-message").textContent = ({git_snapshot: "Git状態を取得中…", git_remote_preflight: "リモート事前診断中…", git_remote_sandbox_probe: "Sandbox事前試験中…", git_remote_relay_probe: "中継事前試験中…", git_remote_ssh_probe: "読み取り専用SSH接続試験中…", git_stage: "選択ファイルをステージ中…",
+  $("git-message").textContent = ({git_snapshot: "Git状態を取得中…", git_remote_preflight: "リモート事前診断中…", git_remote_sandbox_probe: "Sandbox事前試験中…", git_remote_relay_probe: "中継事前試験中…", git_remote_ssh_probe: "読み取り専用SSH接続試験中…", git_fetch: "upstreamをFetch中…", git_pull: "Fast-forward Pull中…", git_stage: "選択ファイルをステージ中…",
     git_review: "ステージ済み全体を確認中…", git_commit: "確認済みの内容をCommit中…"})[type];
   try {
     port.postMessage({type, id: pendingId, workspaceId: $("workspace").value,
@@ -439,6 +439,8 @@ $("git-remote-preflight").addEventListener("click", () => gitRequest("git_remote
 $("git-remote-sandbox-probe").addEventListener("click", () => gitRequest("git_remote_sandbox_probe"));
 $("git-remote-relay-probe").addEventListener("click", () => gitRequest("git_remote_relay_probe"));
 $("git-remote-ssh-probe").addEventListener("click", () => gitRequest("git_remote_ssh_probe"));
+$("git-fetch").addEventListener("click", () => gitRequest("git_fetch"));
+$("git-pull").addEventListener("click", () => gitRequest("git_pull"));
 $("model").addEventListener("change", () => {
   try { localStorage.setItem(`focodex:model:${$("workspace").value}:${currentProject()}`, $("model").value); }
   catch { /* Selection still works when local storage is unavailable. */ }
@@ -458,6 +460,8 @@ function controls() {
   $("git-remote-sandbox-probe").disabled = gitBusy;
   $("git-remote-relay-probe").disabled = gitBusy;
   $("git-remote-ssh-probe").disabled = gitBusy;
+  $("git-fetch").disabled = gitBusy;
+  $("git-pull").disabled = gitBusy;
   $("git-stage").disabled = gitBusy || !gitSnapshotToken || ![...gitSelections.values()].some(input => input.checked && !input.disabled);
   $("git-review").disabled = gitBusy || !gitCanModify || !$("commit-message").value.trim();
   $("git-commit").disabled = gitBusy || !gitReviewToken;
@@ -540,7 +544,7 @@ $("connect").addEventListener("click", () => {
       }
       showRepositoryRows();
       $("manager-message").textContent = `${(message.repositories || []).length}件のリポジトリを検出しました。`;
-    } else if (["git_snapshot", "git_remote_preflight", "git_remote_sandbox_probe", "git_remote_relay_probe", "git_remote_ssh_probe", "git_stage", "git_review", "git_commit"].includes(message.type) &&
+    } else if (["git_snapshot", "git_remote_preflight", "git_remote_sandbox_probe", "git_remote_relay_probe", "git_remote_ssh_probe", "git_fetch", "git_pull", "git_stage", "git_review", "git_commit"].includes(message.type) &&
                message.id === pendingId && pendingKind === message.type) {
       busy = false; pendingId = null; pendingKind = null;
       $("diff-panel").open = true;
@@ -567,6 +571,14 @@ $("connect").addEventListener("click", () => {
       } else if (message.type === "git_remote_ssh_probe") {
         resetGit();
         $("git-message").textContent = "読み取り専用SSH接続試験に成功: 固定宛先・専用Agent・最小known_hosts・中継を通じてupstreamを確認しました。Fetch/Pull/Pushは実行していません。";
+      } else if (message.type === "git_fetch") {
+        resetGit();
+        $("git-message").textContent = `Fetch完了: ${branchName(message.branch)} のupstream=${message.upstream} を取得しました。作業ツリーとインデックスは変更していません。`;
+      } else if (message.type === "git_pull") {
+        resetGit();
+        $("git-message").textContent = message.pull === "upToDate"
+          ? `Pull不要: ${branchName(message.branch)} はupstream=${message.upstream} と同じです。`
+          : `Fast-forward Pull完了: ${branchName(message.branch)} をupstream=${message.upstream} へ更新しました。`;
       } else {
         clearGitReview();
         gitCanModify = message.canModify === true;

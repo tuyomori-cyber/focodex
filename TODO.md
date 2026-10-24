@@ -22,7 +22,7 @@
 - [x] 第2段階：Status、選択的ステージ、固定treeによる全差分確認、Commit、Commit欄への明示反映・独立Undo・クリアを実装。確認後の変更と旧OID不一致を拒否し、選択外・既存ステージを保持する。明示選択した単独リポジトリも同じGit安全処理へ通す。最終確認は要約と詳細展開に分け、確認取消を提供する。実Gitと画面ロジック試験が成功。Pull・Pushは提供しない。
 - [ ] ステージ済みファイルの解除を、既存ステージ・確認トークン失効・再確認・状態変化検出を含めて設計・実装する。現時点では「ステージ済み（解除は未対応）」と明示するだけにする。
 - [x] Host再登録と拡張・操作タブの再読み込み後、Firefoxで第2段階の通常操作（Git状態取得、Stage、Commit最終確認、Commit、再取得）を確認した。表示再取得失敗の分岐は自動試験で確認。Surfaceタッチは未確認。
-- [ ] 第3段階：Fast-forward Pullと単一追跡ブランチへの通常Pushを追加する。固定宛先・専用Agent・最小known_hosts・中継・`ls-remote`限定の読み取り専用SSH接続試験のHost/UIと回帰試験は実装済み。GNOME KeyringのLoginコレクション自動解除、固定設定、foxbookログイン後の専用Agent再生成と固定鍵の自動登録はSurfaceで確認済みである。Surfaceの`git-test`は明示SSH URL・専用Agent・直接`ls-remote`・事前診断・ループバック中継まで成功したが、Focodexの実upstream試験は`wrapper-command`後に中継未到達で失敗している。引継ぎの事実・制約・次の調査は[読み取り専用SSH接続試験 引継ぎ記録](specification/Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md)を正とする。成功までFetch/Pull/Pushは実装・実行しない。
+- [ ] 第3段階：Fast-forward Pullと単一追跡ブランチへの通常Pushを追加する。固定宛先・専用Agent・最小known_hosts・中継・`ls-remote`限定の読み取り専用SSH接続試験のHost/UIと回帰試験は実装済み。GNOME KeyringのLoginコレクション自動解除、固定設定、foxbookログイン後の専用Agent再生成と固定鍵の自動登録はSurfaceで確認済みである。Surfaceの`git-test`では、明示SSH URL・専用Agent・直接`ls-remote`・事前診断・ループバック中継に加え、Focodex画面からの実upstream `ls-remote`も成功した。安全な診断は`outcome=passed`、`wrapperStatus=exited`、`proxyStatus=connected`、中継・固定宛先接続とも成功であった。Fetch単独のHost/UI実装を追加した。通常リポジトリだけを対象に、作業ツリーをSandboxへ公開せず`.git`だけを公開して、現在のupstreamのリモート追跡参照を固定refspecで取得する。非ゼロ終了・終了未確認・作業ツリーまたはインデックスの変化は安全側で後続操作を停止する。画面ロジック・Sandbox引数・構文試験は成功したが、Surface実機Fetchは未検証である。Pull/Pushは実装・実行しない。詳細は[読み取り専用SSH接続試験 引継ぎ記録](specification/Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md)を正とする。
 - [x] 同じHost設定を使うCodex実行とすべてのGit操作を排他にし、プロセス群終了と実行後の検証まで保持する。Gitにも起動前の永続記録を適用し、結果不明・Host異常終了後の後続操作を拒否する。異なる設定での同一リポジトリ利用と、プロセス群から離脱する子孫の包含は保証外。
 - [x] ロックと安全な実行状態を分離。Codex起動前の永続記録を、専用プロセス群の消滅確認後だけ削除する。終了未確認・Host強制終了後は別HostからもCodex・Git操作・設定変更を拒否する。正常記録はOS再起動を確認して解除可能。破損記録は自動解除しない。Host模擬試験で確認済み。
 - [x] 古い仕様記述をpermission profile・ワークスペース管理・現在のGit実装範囲へ整合した。
@@ -85,6 +85,10 @@
 - [ ] 端末内の履歴の保存場所・保持上限・保存タイミングとセッション再開を確定・実装する。
 - [x] Codexから分離したGit専用のstatus・差分確認を実装し、Firefox画面で未追跡ファイルの表示を確認。
 - [x] 第2段階のファイル単位ステージ・Commitを実装。Pull・Pushは第3段階の設計・検証後に扱う。
+- [x] 第3段階の固定SSH経路によるFetchを通常リポジトリ向けに実装し、SurfaceのFocodex画面で成功を確認。作業ツリー・インデックス・HEADは更新しない。
+- [x] Fetch後の追跡参照を検証し、クリーンな通常リポジトリだけにFast-forward限定Pullを実装・Surfaceで確認する。更新不要・ローカル先行・分岐・競合は拒否し、自動merge/rebaseは行わない。
+- [x] Fast-forward限定Pullを実装し、Surfaceで更新不要と、別端末の先行コミットを取り込む更新経路を確認。既存のマージコミットはPull以前に作成されたもので、Focodexは`merge --ff-only`固定により新規マージコミットを作成しない。
+- [ ] Pushは要件整理済み・未実装。現在ブランチのupstreamへの非強制送信だけに固定し、Git設定・フック・外部helperを制限する。通信失敗とリモート更新成否不明を分け、後者では後続操作を停止する。
 - [x] ステージ済み全体の確認、確認後の変更検知、CodexとGit操作の排他を自動試験で確認。Firefoxでの操作は上記の実機課題に保持。
 - [x] Git indexの不正な短縮・終端欠落を検証エラーとして拒否し、Stage/Commit成功後の表示再取得失敗は結果未確認にせず、再取得可能な成功結果として返すようにした。Host・Git自動試験が成功。
 - [ ] メインPCとSurfaceでcommit・push・pullによる変更の受け渡しを確認する。履歴分岐は自動解消しない。
