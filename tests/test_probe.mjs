@@ -81,8 +81,9 @@ assert.match(elements['git-files'].options[1].options[0].textContent, /test.txt.
 elements['git-remote-preflight'].fire('click');
 assert.equal(sent.at(-1).type, 'git_remote_preflight');
 reply({type: 'git_remote_preflight', id: sent.at(-1).id, branch: 'refs/heads/main', upstream: 'origin/main',
-  sshAgentAvailable: true, bwrapAvailable: true, gitAvailable: true, sshAvailable: true});
-assert.match(elements['git-message'].textContent, /SSH Agent=利用可能/);
+  sshAgentAvailable: true, remoteAgentStatus: 'ready', bwrapAvailable: true, gitAvailable: true, sshAvailable: true});
+assert.match(elements['git-message'].textContent, /通常SSH Agent=利用可能/);
+assert.match(elements['git-message'].textContent, /Focodex専用Agent=設定済み・鍵あり/);
 assert.equal(elements['git-files'].options.length, 0, '診断後はGit状態を再取得する');
 elements['git-remote-sandbox-probe'].fire('click');
 assert.equal(sent.at(-1).type, 'git_remote_sandbox_probe');

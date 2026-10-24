@@ -18,6 +18,7 @@ import git_ops
 
 BWRAP = '/usr/bin/bwrap'
 TIMEOUT = 10
+RELAY_SHUTDOWN_TIMEOUT = TIMEOUT + 1
 RELAY_BUFFER = 64 * 1024
 CLOSE_POLL_SECONDS = 0.1
 SSH_USER = re.compile(r'^[A-Za-z_][A-Za-z0-9_-]{0,31}$')
@@ -147,6 +148,11 @@ def known_host_name(target):
     return target.host if target.port == 22 else f'[{target.host}]:{target.port}'
 
 
+def minimal_passwd():
+    """Give SSH a resolvable current UID without exposing host /etc."""
+    return f'focodex:x:{os.geteuid()}:{os.getegid()}:Focodex:/nonexistent:/sbin/nologin\n'.encode()
+
+
 def dedicated_agent_socket():
     """Accept only an explicitly configured, user-private remote Agent.
 
@@ -167,6 +173,25 @@ def dedicated_agent_socket():
     return path
 
 
+def dedicated_agent_status():
+    """Return only a non-secret availability class for the dedicated Agent."""
+    if not os.environ.get('FOCODEX_REMOTE_AGENT'):
+        return 'notConfigured'
+    try:
+        agent = dedicated_agent_socket()
+    except ValueError:
+        return 'unavailable'
+    try:
+        result = subprocess.run(['/usr/bin/ssh-add', '-l'], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                timeout=TIMEOUT, check=False,
+                                env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent',
+                                     'SSH_AUTH_SOCK': str(agent), 'LC_ALL': 'C.UTF-8'})
+    except (OSError, subprocess.SubprocessError):
+        return 'unavailable'
+    return 'ready' if result.returncode == 0 else 'noKeys' if result.returncode == 1 else 'unavailable'
+
+
 def fixed_ssh_config(target=None):
     """Fixed SSH options with no inherited config or client-selected relay."""
     host = 'focodex-remote' if target is None else target.host
@@ -181,7 +206,7 @@ def fixed_ssh_config(target=None):
             '  BatchMode yes\n'
             '  PasswordAuthentication no\n'
             '  KbdInteractiveAuthentication no\n'
-            '  IdentitiesOnly yes\n'
+            '  IdentitiesOnly no\n'
             '  IdentityFile none\n'
             '  IdentityAgent /run/focodex/agent.sock\n'
             '  ForwardAgent no\n'
@@ -207,7 +232,7 @@ def fixed_ssh_wrapper(target):
             '  -o BatchMode=yes \\\n'
             '  -o PasswordAuthentication=no \\\n'
             '  -o KbdInteractiveAuthentication=no \\\n'
-            '  -o IdentitiesOnly=yes \\\n'
+            '  -o IdentitiesOnly=no \\\n'
             '  -o IdentityFile=none \\\n'
             '  -o IdentityAgent=/run/focodex/agent.sock \\\n'
             '  -o ForwardAgent=no \\\n'
@@ -421,12 +446,12 @@ def readonly_ssh_probe(project):
     known = known_host_entries(known_host_name(target), Path.home() / '.ssh/known_hosts')
     with tempfile.TemporaryDirectory(prefix='focodex-ssh-') as directory:
         base = Path(directory); os.chmod(base, 0o700)
-        known_file, config_file, proxy_file, wrapper_file, status_file, stderr_file = (base / 'known_hosts', base / 'ssh_config',
+        known_file, config_file, proxy_file, wrapper_file, status_file, stderr_file, passwd_file = (base / 'known_hosts', base / 'ssh_config',
                                                                                          base / 'ssh_proxy.py', base / 'ssh-wrapper',
-                                                                                         base / 'proxy-status', base / 'ssh-stderr')
+                                                                                         base / 'proxy-status', base / 'ssh-stderr', base / 'passwd')
         known_file.write_bytes(known); config_file.write_bytes(fixed_ssh_config(target))
         wrapper_file.write_text(fixed_ssh_wrapper(target))
-        status_file.write_bytes(b''); stderr_file.write_bytes(b'')
+        status_file.write_bytes(b''); stderr_file.write_bytes(b''); passwd_file.write_bytes(minimal_passwd())
         proxy_file.write_text('import os,select,socket,sys\n'
                               'def status(v):\n'
                               ' try:open(sys.argv[2],"wb").write(v)\n'
@@ -456,7 +481,7 @@ def readonly_ssh_probe(project):
                               '  d=s.recv(65536)\n'
                               '  if not d:break\n'
                               '  write_all(d)\n')
-        for path in (known_file, config_file, proxy_file, status_file, stderr_file): os.chmod(path, 0o600)
+        for path in (known_file, config_file, proxy_file, status_file, stderr_file, passwd_file): os.chmod(path, 0o600)
         os.chmod(wrapper_file, 0o700)
         with FixedTargetProxy(target.host, target.port) as proxy:
             errors = []
@@ -467,6 +492,7 @@ def readonly_ssh_probe(project):
                 '--ro-bind', str(wrapper_file), '/run/focodex/ssh-wrapper',
                 '--bind', str(status_file), '/run/focodex/proxy-status',
                 '--bind', str(stderr_file), '/run/focodex/ssh-stderr',
+                '--dir', '/etc', '--ro-bind', str(passwd_file), '/etc/passwd',
                 # GIT_SSH_COMMAND outranks a repository's core.sshCommand;
                 # GIT_SSH does not.  The wrapper is a fixed single pathname.
                 '--setenv', 'SSH_AUTH_SOCK', '/run/focodex/agent.sock', '--setenv', 'GIT_SSH_COMMAND', '/run/focodex/ssh-wrapper',
@@ -565,7 +591,7 @@ def ssh_probe_error(stderr, returncode=None):
     # git ls-remote --exit-code reserves 2 for a reachable remote that has no
     # matching ref.  This is not an SSH transport failure.
     if classification == 'upstream-ref':
-        return '読み取り専用SSH接続試験に失敗しました。upstreamの追跡ブランチを確認してください。'
+        return '読み取り専用SSH接続試験に失敗しました。upstreamブランチ（追跡ブランチ）を確認してください。'
     if classification == 'proxy-connect':
         return '読み取り専用SSH接続試験に失敗しました。Sandbox内の固定中継ソケットを確認してください。'
     if classification == 'proxy-command':
@@ -575,7 +601,7 @@ def ssh_probe_error(stderr, returncode=None):
     if classification == 'ssh-config':
         return '読み取り専用SSH接続試験に失敗しました。固定SSH設定を確認してください。'
     if classification == 'host-key':
-        return '読み取り専用SSH接続試験に失敗しました。接続先の既知鍵を確認してください。'
+        return '読み取り専用SSH接続試験に失敗しました。接続先のホスト鍵（既知鍵）を確認してください。'
     if classification == 'agent-auth':
         return '読み取り専用SSH接続試験に失敗しました。専用Agentの鍵または接続先制約を確認してください。'
     if classification == 'repository-access':
@@ -585,3 +611,16 @@ def ssh_probe_error(stderr, returncode=None):
     if classification == 'agent-setup':
         return '読み取り専用SSH接続試験に失敗しました。専用Agentの認証準備を確認してください。'
     return '読み取り専用SSH接続試験に失敗しました。SSHまたは固定中継を確認してください。'
+
+
+def ssh_probe_failure_reason(proxy, errors, diagnostic, returncode=None):
+    """Compatibility helper: fixed, non-secret failure wording only."""
+    client_connected = getattr(proxy, 'client_connected', None)
+    target_connected = getattr(proxy, 'target_connected', None)
+    accepted = client_connected if isinstance(client_connected, bool) else getattr(proxy, 'accepted', False)
+    connected = target_connected if isinstance(target_connected, bool) else getattr(proxy, 'connected', False)
+    if not accepted:
+        return '読み取り専用SSH接続試験に失敗しました: Sandbox内SSHが中継へ接続できませんでした。'
+    if not connected:
+        return '読み取り専用SSH接続試験に失敗しました: 固定宛先への接続に失敗しました。'
+    return ssh_probe_error(diagnostic, returncode)

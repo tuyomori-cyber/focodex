@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import select
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -107,6 +108,16 @@ def main():
                    '-c', f'permissions.{PROFILE}={toml_value(profile)}',
                    'app-server', '--listen', 'stdio://']
         server = AppServer(command)
+        runtime_value = os.environ.get('XDG_RUNTIME_DIR')
+        if not runtime_value:
+            raise RuntimeError('ユーザーruntimeディレクトリを確認できません。')
+        runtime = Path(runtime_value)
+        if not runtime.is_dir():
+            raise RuntimeError('ユーザーruntimeディレクトリを確認できません。')
+        socket_path = runtime / f'focodex-sandbox-verify-{os.getpid()}.sock'
+        agent_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        agent_socket.bind(str(socket_path))
+        os.chmod(socket_path, 0o600)
         try:
             initialized = server.request('initialize', {
                 'clientInfo': {'name': 'focodex-workspace-verify',
@@ -144,8 +155,13 @@ def main():
             expect('未登録Cがホスト側で不変', command_result(server,
                    f'printf FORBIDDEN > {shell_quote(repo_c / "write-c.txt")}', repo_a),
                    lambda value: not (repo_c / 'write-c.txt').exists())
+            expect('runtime内のUnixソケットを確認できない', command_result(server,
+                   f'test ! -e {shell_quote(socket_path)}', repo_a),
+                   lambda value: value.get('exitCode') == 0)
         finally:
             server.close()
+            agent_socket.close()
+            socket_path.unlink(missing_ok=True)
 
 
 if __name__ == '__main__':

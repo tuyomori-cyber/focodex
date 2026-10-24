@@ -203,6 +203,7 @@ class GitTests(unittest.TestCase):
         self.assertEqual(result['branch'], 'refs/heads/main')
         self.assertEqual(result['upstream'], 'origin/main')
         self.assertIsInstance(result['sshAgentAvailable'], bool)
+        self.assertEqual(result['remoteAgentStatus'], 'notConfigured')
         self.assertNotIn('url', result)
         self.assertFalse(self.config.with_suffix('.execution.json').exists())
 
@@ -246,6 +247,28 @@ class GitTests(unittest.TestCase):
         self.assertNotIn('SSH_AUTH_SOCK', args)
         self.assertNotIn('/run/focodex/agent.sock', args)
 
+    def test_minimal_passwd_exposes_only_a_synthetic_current_user(self):
+        self.assertEqual(git_remote.minimal_passwd(),
+                         f'focodex:x:{os.geteuid()}:{os.getegid()}:Focodex:/nonexistent:/sbin/nologin\n'.encode())
+
+    def test_relay_shutdown_wait_covers_its_bounded_io_timeout(self):
+        self.assertGreater(git_remote.RELAY_SHUTDOWN_TIMEOUT, git_remote.TIMEOUT)
+
+    def test_ssh_probe_failure_reason_does_not_expose_endpoint_details(self):
+        proxy = mock.MagicMock(accepted=True, connected=True)
+        self.assertIn('ホスト鍵', git_remote.ssh_probe_failure_reason(
+            proxy, [], b'Host key verification failed for github.example'))
+        self.assertIn('専用Agent', git_remote.ssh_probe_failure_reason(
+            proxy, [], b'git@github.example: Permission denied (publickey)'))
+        self.assertNotIn('github.example', git_remote.ssh_probe_failure_reason(
+            proxy, [], b'git@github.example: Permission denied (publickey)'))
+        proxy.accepted = False
+        self.assertIn('中継へ接続', git_remote.ssh_probe_failure_reason(proxy, [], b''))
+        proxy.accepted = True
+        self.assertIn('upstreamブランチ', git_remote.ssh_probe_failure_reason(proxy, [], b'', 2))
+        self.assertIn('upstreamブランチ', git_remote.ssh_probe_failure_reason(
+            proxy, [], b'Warning: Identity file none not accessible', 2))
+
     def test_known_host_entries_returns_only_matching_key_rows(self):
         known = self.root / 'known_hosts'; known.write_text('placeholder\n')
         completed = subprocess.CompletedProcess([], 0, b'# Host example found\nexample ssh-ed25519 key\n')
@@ -263,12 +286,21 @@ class GitTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {'FOCODEX_REMOTE_AGENT': str(agent)}):
             with self.assertRaises(ValueError): git_remote.dedicated_agent_socket()
 
+    def test_dedicated_agent_status_never_discloses_key_material(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(git_remote.dedicated_agent_status(), 'notConfigured')
+        with mock.patch.dict(os.environ, {'FOCODEX_REMOTE_AGENT': str(self.root / 'missing.sock')}):
+            self.assertEqual(git_remote.dedicated_agent_status(), 'unavailable')
+        agent = self.root / 'agent.sock'; agent.write_bytes(b'not a socket')
+        with mock.patch.dict(os.environ, {'FOCODEX_REMOTE_AGENT': str(agent)}):
+            self.assertEqual(git_remote.dedicated_agent_status(), 'unavailable')
+
     def test_fixed_ssh_config_disables_inherited_authentication_paths(self):
         target = git_remote.SshRemote('git', 'example.test', 2222, '/team/repository.git')
         config = git_remote.fixed_ssh_config(target).decode()
         for line in ('StrictHostKeyChecking yes', 'UpdateHostKeys no', 'BatchMode yes',
                      'PasswordAuthentication no', 'KbdInteractiveAuthentication no',
-                     'IdentitiesOnly yes', 'IdentityFile none', 'GlobalKnownHostsFile /dev/null'):
+                     'IdentitiesOnly no', 'IdentityFile none', 'GlobalKnownHostsFile /dev/null'):
             self.assertIn(line, config)
         self.assertIn('Host example.test', config)
         self.assertIn('Port 2222', config)
@@ -280,6 +312,10 @@ class GitTests(unittest.TestCase):
         self.assertIn('2>/run/focodex/ssh-stderr', wrapper)
         wrapper_path = self.root / 'ssh-wrapper'; wrapper_path.write_text(wrapper)
         self.assertEqual(subprocess.run(['/bin/sh', '-n', str(wrapper_path)], check=False).returncode, 0)
+
+    def test_minimal_passwd_has_only_current_user(self):
+        self.assertEqual(git_remote.minimal_passwd(),
+                         f'focodex:x:{os.geteuid()}:{os.getegid()}:Focodex:/nonexistent:/sbin/nologin\n'.encode())
 
     def test_ssh_probe_error_keeps_transport_details_private(self):
         self.assertIn('既知鍵', git_remote.ssh_probe_error(b'Host key verification failed for secret.example'))
