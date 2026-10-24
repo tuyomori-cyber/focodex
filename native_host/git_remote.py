@@ -68,7 +68,16 @@ def proxy_status_value(path):
         value = Path(path).read_bytes().decode('ascii', 'ignore')
     except OSError:
         return 'unavailable'
-    return value if value in ('', 'wrapper-config-probe', 'wrapper-command', 'started', 'connected', 'connect-failed') else 'invalid'
+    return value if value in ('', 'started', 'connected', 'connect-failed') else 'invalid'
+
+
+def wrapper_status_value(path):
+    """Read only a fixed, non-secret wrapper lifecycle marker."""
+    try:
+        value = Path(path).read_bytes().decode('ascii', 'ignore')
+    except OSError:
+        return 'unavailable'
+    return value if value in ('', 'config-probe', 'command', 'exited') else 'invalid'
 
 
 @dataclass(frozen=True)
@@ -219,9 +228,9 @@ def fixed_ssh_wrapper(target):
     if not isinstance(target, SshRemote):
         raise ValueError('固定SSH設定を生成できません。')
     return ('#!/bin/sh\n'
-            'case " $* " in *" -G "*) printf wrapper-config-probe > /run/focodex/proxy-status ;; '
-            '*) printf wrapper-command > /run/focodex/proxy-status ;; esac\n'
-            'exec /usr/bin/ssh -vv \\\n'
+            'case " $* " in *" -G "*) printf config-probe > /run/focodex/wrapper-status ;; '
+            '*) printf command > /run/focodex/wrapper-status ;; esac\n'
+            '/usr/bin/ssh -vv \\\n'
             f'  -o HostName={target.host} \\\n'
             f'  -o Port={target.port} \\\n'
             f'  -o User={target.user} \\\n'
@@ -240,7 +249,9 @@ def fixed_ssh_wrapper(target):
             '  -o PermitLocalCommand=no \\\n'
             "  -o 'ProxyCommand=/usr/bin/python3 /run/focodex/ssh_proxy.py /run/focodex/transport.sock /run/focodex/proxy-status' \\\n"
             '  "$@" 2>/run/focodex/ssh-stderr\n'
-            'exit $?\n')
+            'status=$?\n'
+            'printf exited > /run/focodex/wrapper-status\n'
+            'exit "$status"\n')
 
 
 class FixedTargetProxy:
@@ -358,18 +369,30 @@ def sandbox_arguments(project, agent):
             'test -r /work/.git/HEAD && test ! -e /home && ssh-add -l >/dev/null && ! touch /work/.focodex-sandbox-probe']
 
 
-def relay_arguments(project):
+def relay_arguments(project, expose_project=True, writable_project=False):
     """Sandbox for the local relay probe; deliberately exposes no SSH Agent."""
     root = Path(project).resolve(strict=True)
     if not Path(BWRAP).is_file() or not Path('/usr/bin/python3').is_file():
         raise ValueError('中継試験に必要な実行ファイルがありません。')
-    return [BWRAP, '--unshare-all', '--die-with-parent', '--new-session', '--clearenv',
+    command = [BWRAP, '--unshare-all', '--die-with-parent', '--new-session', '--clearenv',
             '--ro-bind', '/usr', '/usr', '--symlink', 'usr/bin', '/bin',
             '--symlink', 'usr/sbin', '/sbin', '--symlink', 'usr/lib', '/lib',
             '--symlink', 'usr/lib64', '/lib64', '--proc', '/proc', '--dev', '/dev',
-            '--dir', '/work', '--ro-bind', str(root), '/work', '--dir', '/run',
+            '--dir', '/work']
+    if expose_project:
+        command += ['--bind' if writable_project else '--ro-bind', str(root), '/work']
+    command += ['--dir', '/run',
             '--dir', '/run/focodex', '--setenv', 'HOME', '/nonexistent',
             '--setenv', 'PATH', '/usr/bin:/bin', '--chdir', '/work']
+    return command
+
+
+def fetch_sandbox_arguments(project, gitdir):
+    """Expose only a normal repository's Git directory for Fetch writes."""
+    source = Path(gitdir).resolve(strict=True)
+    if not source.is_dir() or source.is_symlink():
+        raise ValueError('Fetch用Git管理情報を安全に読み書きできません。')
+    return relay_arguments(project, expose_project=False) + ['--bind', str(source), '/work/.git']
 
 
 def sandbox_probe(project):
@@ -438,20 +461,52 @@ def relay_probe(project):
     return {'relay': 'passed', 'networkShared': False, 'externalNetworkUsed': False}
 
 
-def readonly_ssh_probe(project):
-    """One explicit, read-only ls-remote through the pinned relay."""
+def _remote_ssh_operation(project, fetch=False, push=False):
+    """Run one fixed SSH Git operation through the pinned relay."""
+    if fetch and push:
+        raise ValueError('同時にFetchとPushは実行できません。')
+    event = 'push' if push else 'fetch' if fetch else 'ssh-probe'
     repo = git_ops.Repository(project)
     remote, merge, target = upstream_ssh_remote(repo)
+    before = None
+    tracking_ref = None
+    ref = head = None
+    if fetch:
+        # Fetch must not expose the work tree to its sandbox.  Supporting a
+        # worktree needs a separately validated mapping for its external
+        # common Git directory, so reject it rather than widening mounts.
+        if repo.gitdir != repo.root / '.git' or repo.common != repo.gitdir:
+            raise ValueError('Fetchは通常リポジトリだけに対応します。')
+        repo.writable()
+        if repo.changes():
+            raise ValueError('Fetch前に作業ツリーとインデックスをクリーンにしてください。')
+        before = repo.fingerprint()
+        tracking_ref = 'refs/remotes/' + remote + '/' + merge.removeprefix('refs/heads/')
+        if not re.fullmatch(r'refs/remotes/[A-Za-z0-9._/-]+', tracking_ref) or '..' in tracking_ref or '//' in tracking_ref:
+            raise ValueError('upstream参照を安全に扱えません。')
+    elif push:
+        # A normal push reads the complete object database but must not be
+        # allowed to change the local repository.  Pin both sides of the
+        # refspec; never rely on push.default or a remote push refspec.
+        repo.writable()
+        ref, head = repo.branch()
+        if head is None:
+            raise ValueError('初回Commit前のブランチはPushできません。')
+        for candidate in (ref, merge):
+            if repo.call('check-ref-format', '--normalize', candidate).strip() != candidate:
+                raise ValueError('Push先の参照を安全に扱えません。')
+        before = repo.fingerprint()
     agent = dedicated_agent_socket()
     known = known_host_entries(known_host_name(target), Path.home() / '.ssh/known_hosts')
     with tempfile.TemporaryDirectory(prefix='focodex-ssh-') as directory:
         base = Path(directory); os.chmod(base, 0o700)
-        known_file, config_file, proxy_file, wrapper_file, status_file, stderr_file, passwd_file = (base / 'known_hosts', base / 'ssh_config',
+        known_file, config_file, proxy_file, wrapper_file, wrapper_status_file, proxy_status_file, stderr_file, passwd_file = (base / 'known_hosts', base / 'ssh_config',
                                                                                          base / 'ssh_proxy.py', base / 'ssh-wrapper',
-                                                                                         base / 'proxy-status', base / 'ssh-stderr', base / 'passwd')
+                                                                                         base / 'wrapper-status', base / 'proxy-status',
+                                                                                         base / 'ssh-stderr', base / 'passwd')
         known_file.write_bytes(known); config_file.write_bytes(fixed_ssh_config(target))
         wrapper_file.write_text(fixed_ssh_wrapper(target))
-        status_file.write_bytes(b''); stderr_file.write_bytes(b''); passwd_file.write_bytes(minimal_passwd())
+        wrapper_status_file.write_bytes(b''); proxy_status_file.write_bytes(b''); stderr_file.write_bytes(b''); passwd_file.write_bytes(minimal_passwd())
         proxy_file.write_text('import os,select,socket,sys\n'
                               'def status(v):\n'
                               ' try:open(sys.argv[2],"wb").write(v)\n'
@@ -481,16 +536,17 @@ def readonly_ssh_probe(project):
                               '  d=s.recv(65536)\n'
                               '  if not d:break\n'
                               '  write_all(d)\n')
-        for path in (known_file, config_file, proxy_file, status_file, stderr_file, passwd_file): os.chmod(path, 0o600)
+        for path in (known_file, config_file, proxy_file, wrapper_status_file, proxy_status_file, stderr_file, passwd_file): os.chmod(path, 0o600)
         os.chmod(wrapper_file, 0o700)
         with FixedTargetProxy(target.host, target.port) as proxy:
             errors = []
             thread = threading.Thread(target=lambda: _relay_once(proxy, errors), daemon=True); thread.start()
-            command = relay_arguments(project) + ['--bind', str(proxy.socket_path), '/run/focodex/transport.sock',
+            command = (fetch_sandbox_arguments(project, repo.gitdir) if fetch else relay_arguments(project)) + ['--bind', str(proxy.socket_path), '/run/focodex/transport.sock',
                 '--bind', str(agent), '/run/focodex/agent.sock', '--ro-bind', str(known_file), '/run/focodex/known_hosts',
                 '--ro-bind', str(config_file), '/run/focodex/ssh_config', '--ro-bind', str(proxy_file), '/run/focodex/ssh_proxy.py',
                 '--ro-bind', str(wrapper_file), '/run/focodex/ssh-wrapper',
-                '--bind', str(status_file), '/run/focodex/proxy-status',
+                '--bind', str(wrapper_status_file), '/run/focodex/wrapper-status',
+                '--bind', str(proxy_status_file), '/run/focodex/proxy-status',
                 '--bind', str(stderr_file), '/run/focodex/ssh-stderr',
                 '--dir', '/etc', '--ro-bind', str(passwd_file), '/etc/passwd',
                 # GIT_SSH_COMMAND outranks a repository's core.sshCommand;
@@ -500,56 +556,155 @@ def readonly_ssh_probe(project):
                 # heuristic can otherwise classify a command-with-options as
                 # a generic SSH client.  Pin its documented OpenSSH variant.
                 '--setenv', 'GIT_SSH_VARIANT', 'ssh',
-                '--setenv', 'GIT_CONFIG_NOSYSTEM', '1', '--setenv', 'GIT_CONFIG_GLOBAL', '/dev/null', '--setenv', 'GIT_TERMINAL_PROMPT', '0',
-                '/usr/bin/git', '-c', 'core.sshCommand=/run/focodex/ssh-wrapper',
-                '-C', '/work', 'ls-remote', '--exit-code', remote, merge]
+                '--setenv', 'GIT_CONFIG_NOSYSTEM', '1', '--setenv', 'GIT_CONFIG_GLOBAL', '/dev/null', '--setenv', 'GIT_TERMINAL_PROMPT', '0']
+            command += ['/usr/bin/git', '-c', 'core.sshCommand=/run/focodex/ssh-wrapper',
+                '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.attributesFile=/dev/null',
+                '-c', 'fetch.writeCommitGraph=false', '-C', '/work']
+            if fetch:
+                command += ['fetch', '--no-tags', '--no-write-fetch-head',
+                            '--no-recurse-submodules', remote, f'{merge}:{tracking_ref}']
+            elif push:
+                command += ['push', '--porcelain', '--no-verify', remote, f'{ref}:{merge}']
+            else:
+                command += ['ls-remote', '--exit-code', remote, merge]
             process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 start_new_session=True, env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent', 'LC_ALL': 'C.UTF-8'})
             try: process.wait(timeout=TIMEOUT)
             except subprocess.TimeoutExpired as error:
                 os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=3)
-                write_remote_diagnostic({'event': 'ssh-probe', 'outcome': 'timeout',
+                write_remote_diagnostic({'event': event, 'outcome': 'timeout',
                                          'relayAccepted': proxy.client_connected,
                                          'targetConnected': proxy.target_connected,
-                                         'proxyStatus': proxy_status_value(status_file)})
-                raise git_ops.UncertainGit('読み取り専用SSH接続試験が時間切れです。') from error
+                                         'wrapperStatus': wrapper_status_value(wrapper_status_file),
+                                         'proxyStatus': proxy_status_value(proxy_status_file)})
+                raise git_ops.UncertainGit('Pushが時間切れです。結果未確認のためCLIで確認してください。' if push else
+                                           'Fetchが時間切れです。' if fetch else '読み取り専用SSH接続試験が時間切れです。') from error
             git_stderr = process.stderr.read(4096) if process.stderr else b''
             try:
                 ssh_stderr = stderr_file.read_bytes()[:4096]
             except OSError:
                 ssh_stderr = b''
             stderr = ssh_stderr + b'\n' + git_stderr
-            proxy_status = proxy_status_value(status_file)
+            wrapper_status = wrapper_status_value(wrapper_status_file)
+            proxy_status = proxy_status_value(proxy_status_file)
             # If SSH failed before its ProxyCommand connected, do not leave the
             # one-shot relay waiting until its independent accept timeout.
             proxy.close()
             thread.join(3)
             if thread.is_alive():
-                write_remote_diagnostic({'event': 'ssh-probe', 'outcome': 'relay-exit-unconfirmed',
+                write_remote_diagnostic({'event': event, 'outcome': 'relay-exit-unconfirmed',
                                          'returnCode': process.returncode,
                                          'relayAccepted': proxy.client_connected,
-                                         'targetConnected': proxy.target_connected, 'proxyStatus': proxy_status})
+                                         'targetConnected': proxy.target_connected, 'wrapperStatus': wrapper_status,
+                                         'proxyStatus': proxy_status})
                 raise git_ops.UncertainGit('SSH中継の終了確認に失敗しました。')
             if errors:
                 # The fixed relay reached the only place that can open a TCP
                 # connection.  Do not include its exception: it may contain
                 # host or socket details, but distinguish it from SSH auth.
-                write_remote_diagnostic({'event': 'ssh-probe', 'outcome': 'relay-error',
+                write_remote_diagnostic({'event': event, 'outcome': 'relay-error',
                                          'returnCode': process.returncode,
                                          'relayAccepted': proxy.client_connected,
-                                         'targetConnected': proxy.target_connected, 'proxyStatus': proxy_status})
+                                         'targetConnected': proxy.target_connected, 'wrapperStatus': wrapper_status,
+                                         'proxyStatus': proxy_status})
+                if fetch:
+                    raise git_ops.UncertainGit('Fetch中継の終了状態を確認できません。')
+                if push:
+                    raise git_ops.UncertainGit('Push中継の終了状態を確認できません。CLIで結果を確認してください。')
                 raise ValueError('読み取り専用SSH接続試験に失敗しました。固定宛先への中継接続を確認してください。')
             if process.returncode:
-                write_remote_diagnostic({'event': 'ssh-probe', 'outcome': 'ssh-error',
+                classification = ssh_probe_classification(stderr, process.returncode)
+                write_remote_diagnostic({'event': event, 'outcome': 'ssh-error',
                                          'returnCode': process.returncode,
                                          'relayAccepted': proxy.client_connected,
-                                         'targetConnected': proxy.target_connected, 'proxyStatus': proxy_status,
-                                         'classification': ssh_probe_classification(stderr, process.returncode)})
+                                         'targetConnected': proxy.target_connected, 'wrapperStatus': wrapper_status,
+                                         'proxyStatus': proxy_status,
+                                         'classification': classification})
+                if fetch:
+                    raise git_ops.UncertainGit('Fetchの結果を安全に確定できません。')
+                if push:
+                    # An explicit non-fast-forward refusal is the one failure
+                    # that proves the remote ref was not changed.  Other
+                    # failures can occur after the server accepts the update.
+                    if classification == 'push-rejected':
+                        raise ValueError('Pushは拒否されました。upstreamが先行しているため、先にFast-forward Pullしてください。')
+                    raise git_ops.UncertainGit('Pushの結果を安全に確定できません。CLIでupstreamを確認してください。')
                 raise ValueError(ssh_probe_error(stderr, process.returncode))
-            write_remote_diagnostic({'event': 'ssh-probe', 'outcome': 'passed', 'returnCode': 0,
+            write_remote_diagnostic({'event': event, 'outcome': 'passed', 'returnCode': 0,
                                      'relayAccepted': proxy.client_connected,
-                                     'targetConnected': proxy.target_connected, 'proxyStatus': proxy_status})
+                                     'targetConnected': proxy.target_connected, 'wrapperStatus': wrapper_status,
+                                     'proxyStatus': proxy_status})
+    if fetch:
+        fresh = git_ops.Repository(project)
+        if fresh.fingerprint() != before or fresh.changes():
+            raise git_ops.UncertainGit('Fetch後の作業ツリーまたはインデックスが変化しました。')
+        return {'fetch': 'passed', 'readOnlyWorktree': True, 'networkShared': False,
+                'branch': fresh.branch()[0], 'upstream': remote + '/' + merge.removeprefix('refs/heads/')}
+    if push:
+        fresh = git_ops.Repository(project)
+        if fresh.branch() != (ref, head) or fresh.fingerprint() != before:
+            raise git_ops.UncertainGit('Push後のローカル状態を確認できません。CLIで確認してください。')
+        return {'push': 'passed', 'branch': ref, 'upstream': remote + '/' + merge.removeprefix('refs/heads/'),
+                'networkShared': False, 'localRepositoryReadOnly': True}
     return {'ssh': 'passed', 'readOnly': True, 'networkShared': False}
+
+
+def readonly_ssh_probe(project):
+    """One explicit, read-only ls-remote through the pinned relay."""
+    return _remote_ssh_operation(project)
+
+
+def fetch_upstream(project):
+    """Fetch only the current upstream's tracking ref; never update the work tree."""
+    return _remote_ssh_operation(project, fetch=True)
+
+
+def push_upstream(project):
+    """Push exactly the checked-out branch to its explicitly configured upstream."""
+    return _remote_ssh_operation(project, push=True)
+
+
+def pull_upstream(project):
+    """Fetch, then fast-forward only the checked-out branch in a sandbox."""
+    fetch_upstream(project)
+    repo = git_ops.Repository(project)
+    remote, merge, _target = upstream_ssh_remote(repo)
+    if repo.gitdir != repo.root / '.git' or repo.common != repo.gitdir:
+        raise ValueError('Pullは通常リポジトリだけに対応します。')
+    repo.writable()
+    if repo.changes():
+        raise ValueError('Pull前に作業ツリーとインデックスをクリーンにしてください。')
+    ref, head = repo.branch()
+    tracking = 'refs/remotes/' + remote + '/' + merge.removeprefix('refs/heads/')
+    target = repo.call('rev-parse', '--verify', tracking).strip()
+    if head == target:
+        write_remote_diagnostic({'event': 'pull', 'outcome': 'up-to-date'})
+        return {'pull': 'upToDate', 'branch': ref, 'upstream': remote + '/' + merge.removeprefix('refs/heads/')}
+    if repo.call('merge-base', head, target).strip() != head:
+        write_remote_diagnostic({'event': 'pull', 'outcome': 'not-fast-forward'})
+        raise ValueError('Fast-forwardできないためPullを中止しました。')
+    command = relay_arguments(project, writable_project=True) + [
+        '--setenv', 'GIT_CONFIG_NOSYSTEM', '1', '--setenv', 'GIT_CONFIG_GLOBAL', '/dev/null',
+        '--setenv', 'GIT_TERMINAL_PROMPT', '0', '/usr/bin/git', '-c', 'core.hooksPath=/dev/null',
+        '-c', 'core.fsmonitor=false', '-c', 'core.attributesFile=/dev/null', '-C', '/work',
+        'merge', '--ff-only', '--no-verify', tracking]
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               start_new_session=True, env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent', 'LC_ALL': 'C.UTF-8'})
+    try:
+        output, _ = process.communicate(timeout=TIMEOUT)
+    except subprocess.TimeoutExpired as error:
+        os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=3)
+        write_remote_diagnostic({'event': 'pull', 'outcome': 'timeout'})
+        raise git_ops.UncertainGit('Pullが時間切れです。') from error
+    if process.returncode:
+        write_remote_diagnostic({'event': 'pull', 'outcome': 'result-unconfirmed', 'returnCode': process.returncode})
+        raise git_ops.UncertainGit('Pullの結果を安全に確定できません。')
+    fresh = git_ops.Repository(project)
+    if fresh.branch() != (ref, target) or fresh.changes():
+        write_remote_diagnostic({'event': 'pull', 'outcome': 'postflight-mismatch'})
+        raise git_ops.UncertainGit('Pull後の状態を確認できません。')
+    write_remote_diagnostic({'event': 'pull', 'outcome': 'passed', 'returnCode': 0})
+    return {'pull': 'passed', 'branch': ref, 'upstream': remote + '/' + merge.removeprefix('refs/heads/')}
 
 
 def _relay_once(proxy, errors):
@@ -560,6 +715,8 @@ def _relay_once(proxy, errors):
 def ssh_probe_classification(stderr, returncode=None):
     """Stable categories for the private summary log; no SSH text is retained."""
     detail = stderr.lower()
+    if (b'[rejected]' in detail and (b'non-fast-forward' in detail or b'fetch first' in detail)):
+        return 'push-rejected'
     if b'focodex_proxy_connect_failed' in detail:
         return 'proxy-connect'
     if b'executing proxy command' in detail:

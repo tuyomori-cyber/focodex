@@ -345,8 +345,35 @@ Surfaceでは一時的に手動作成した専用AgentへGitHub用鍵をdestinat
 
 2026-10-24に、GDM/PAMからGNOME KeyringのLoginコレクションを自動解除できることを再起動後に確認した。同日に認証管理コンポーネントを追加し、Keyring状態診断、固定設定・鍵ファイルの権限検証、空の専用Agent生成、固定属性のSecret Service項目を使う限定Askpass、固定鍵の登録を実装した。Surfaceでは`firefox-kiosk-app`からAgentを再生成して鍵登録し、ログイン後に`remote_agent.py status`が`ready`となることを確認した。通常のSSH AgentとGNOME Keyringは停止しない。実upstream試験の残る条件は、終了未確認記録の解除と`origin`の明示的な`ssh://`形式への変更である。
 
-## Surface実upstream試験の未解決記録と開発移管（2026-10-24）
+## Surface実upstream試験の成功と次段階（2026-10-24）
 
-終了未確認記録の解除、`git-test`の明示SSH URL化、専用Agentの鍵登録、GitHub認証、直接の`ls-remote`、リモート事前診断、中継事前試験はSurfaceで確認できた。しかしFocodex画面の読み取り専用SSH接続試験は失敗を継続している。最新の安全な診断では、固定SSHラッパーは実接続として起動した一方、Sandboxから`FixedTargetProxy`への接続は受理されていない。実upstream試験は未成功であり、Fetch / Pull / Pushは未実装・未実行である。
+終了未確認記録の解除、`git-test`の明示SSH URL化、専用Agentの鍵登録、GitHub認証、直接の`ls-remote`、リモート事前診断、中継事前試験をSurfaceで確認した。その後、更新Hostを反映したFocodex画面の読み取り専用SSH接続試験も成功した。最新の安全な診断記録は、`outcome=passed`、`returnCode=0`、`relayAccepted=true`、`targetConnected=true`、`wrapperStatus=exited`、`proxyStatus=connected`である。したがって、Sandbox内の固定SSHラッパー、ProxyCommand、固定Unixソケット中継、Host側の固定宛先接続を経由した実upstreamへの`git ls-remote --exit-code origin refs/heads/main`が成功した。
 
-詳細、最新の診断値、秘密情報を出さない追加調査の制約、Surface上のCodex CLIへの引継ぎ手順は[読み取り専用SSH接続試験 引継ぎ記録](../specification/Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md)に集約した。
+同日にSurfaceを再起動してfoxbookを起動し、`remote_agent.py`のKeyring解除、固定設定、Secret Service項目、専用Agent状態を再確認した。すべて期待値どおりで、最後の状態は`ready`であった。したがって、再起動をまたぐ専用Agent再生成と鍵自動登録も確認済みである。
+
+この成功は読み取り専用の接続事前ゲートを通過したことを示す。Fetch、Pull、Push、参照・作業ツリーの変更はこの試験に含まれず、いずれも未実装・未実行である。次は[Pull・Push実装設計](../specification/Focodex_Pull_Push_実装設計.md)に従い、固定経路を使うFetch単独の安全設計・実装へ進む。詳細と既存の制約は[読み取り専用SSH接続試験 引継ぎ記録](../specification/Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md)に集約した。
+
+## Fetch単独の初期実装（Surface実機未検証）
+
+`git_fetch`をHostと画面へ追加した。通常リポジトリだけを対象に、Sandboxへ作業ツリーを公開せず、`.git`だけを`/work/.git`へ書込み可能で公開する。固定した現在のupstreamに対し、`--no-tags`、`--no-write-fetch-head`、`--no-recurse-submodules`と固定refspecを使うため、作業ツリー・インデックス・HEADは更新しない。実行前後に作業ツリーとインデックスの指紋を照合し、非ゼロ終了、時間切れ、中継エラー、終了確認不能、予期しない変化は結果不明として後続Git操作を停止する。worktreeは外部管理情報のSandboxマッピングを別途設計するまで拒否する。
+
+画面ロジック試験、Fetch Sandbox引数試験、関連Git回帰試験、Python/JavaScript構文検査、差分チェックは成功した。SurfaceでのFetch実行、リモート追跡参照更新、更新不要・通信断・中断・終了未確認時の動作は未確認であり、Pull/Pushは未実装・未実行である。
+
+同日、SurfaceのFocodex画面からFetchを実行し、`remote-ssh-diagnostics.jsonl`に`{"event":"fetch","outcome":"passed","returnCode":0,"relayAccepted":true,"targetConnected":true,"wrapperStatus":"exited","proxyStatus":"connected"}`が記録された。固定SSH経路でのFetch成功を確認した。Fetch操作は作業ツリーとインデックスの事前・事後照合を通過しており、HEADの変更は行わない。
+
+次はFast-forward限定Pullである。Fetch後の追跡参照が現在のHEADの子孫であることをHost側で再検証し、クリーンな通常リポジトリだけに、作業ツリーを対象リポジトリ内へ限定した専用Sandboxで`merge --ff-only`相当を行う。更新不要・ローカル先行・分岐・作業ツリー非クリーン・進行中Git操作はすべて拒否し、失敗・中断・終了未確認時は結果不明として後続操作を止める。Pushは引き続き未実装・未実行である。
+
+Pullの初期実装では、`remote-ssh-diagnostics.jsonl`へ非秘密の固定診断を記録する。成功は`{"event":"pull","outcome":"passed","returnCode":0}`、更新不要は`outcome="up-to-date"`、Fast-forward不可は`outcome="not-fast-forward"`であり、時間切れ・実行結果未確認・事後照合不一致も固定値だけを残す。ホスト名、URL、鍵、SSH標準エラー、差分本文は記録しない。診断の回帰試験、Fetch Sandbox引数試験、画面ロジック試験、Python/JavaScript構文検査、差分チェックは成功した。Surface実機Pullは未実行である。
+
+同日、SurfaceでPullを2回実行した。最初は`{"event":"pull","outcome":"up-to-date"}`で更新不要を確認した。次に別端末で検証用リポジトリを1コミット先行させた後、`{"event":"pull","outcome":"passed","returnCode":0}`を確認した。これは固定SSH Fetch後にFast-forward更新経路が成功したことを示す。確認した既存のマージコミットはPull実行より前の時刻に作成されており、`merge --ff-only`固定のFocodexが生成したものではない。
+
+Pushは現在ブランチのupstreamへの明示的な非強制refspecだけを許可する初期実装を追加した。Pushに影響するGit設定・フック・外部helperを制限し、通信失敗などリモート更新成否不明時は永続記録により後続操作を止める。
+
+2026-10-24、SurfaceのFocodex画面で`git-test`を対象に、Stage、ステージ済み全体の最終確認、Commit、通常Pushを順に実行した。最終確認時には、Git の`user.name`と`user.email`が未設定であるためエラーとなった。次の`include`を使わない通常のグローバル設定を直接登録した後、Commitは成功した。
+
+```text
+user.name  tuyomori
+user.email tuyomori@gmail.com
+```
+
+通常Pushの成功後、別端末で送信コミットの内容（`あ`）が確認できた。したがって、FocodexのGit機能について、Commitから現在ブランチのupstreamへの非強制Push、別端末での反映確認までの正常系を1回確認した。更新拒否、通信断、中断、終了未確認、分岐などの実機試験は未実施である。

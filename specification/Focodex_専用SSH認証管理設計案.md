@@ -88,8 +88,8 @@ Askpass子プロセスには、固定した`PATH`、専用Agentソケットに�
 2. [x] 専用Agent作成と、空Agentのソケット権限・再生成失敗を自動試験する。`remote_agent.py`とuser unitをインストーラーへ追加した。Surfaceで鍵登録前の`empty`状態を確認した。
 3. [x] 固定属性のSecret Service項目を使う限定Askpassヘルパーと、固定鍵への`ssh-add`登録処理を追加した。SurfaceでKeyringの自動解除、設定・Secret Service項目の診断、`ready`状態まで確認した。
 4. destination constraintを使う場合は、登録対象ホストの既知鍵と対象鍵を固定設定から決め、異なる宛先への署名を拒否することを確認する。
-5. [x] foxbookの`firefox-kiosk-app`から専用Agentを再生成し、Firefox終了時に停止する処理を追加した。ログイン後に`ready`を確認した。SSH接続併存、Plasma切替、OS再起動を含む長期的な再現性確認は継続課題とする。
+5. [x] foxbookの`firefox-kiosk-app`から専用Agentを再生成し、Firefox終了時に停止する処理を追加した。ログイン後、およびSurfaceのOS再起動後に`ready`を確認した。SSH接続併存とPlasma切替を含む長期的な再現性確認は継続課題とする。
 6. Native Hostの非秘密診断を追加し、「認証準備未完了」時に読み取り専用SSH接続試験が開始されないことを確認する。
-7. 明示的な`ssh://`形式の実upstreamに対する`ls-remote`限定試験を実行する。Surfaceでは認証準備と直接試験までは成功したが、Focodex固定中継経路の実upstream試験は未成功である。現在の診断と引継ぎは[読み取り専用SSH接続試験 引継ぎ記録](Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md)を参照する。
+7. [x] 明示的な`ssh://`形式の実upstreamに対する`ls-remote`限定試験を実行する。Surfaceでは認証準備・直接試験に加え、Focodex固定中継経路の実upstream試験も成功した。安全な診断は`outcome=passed`、`wrapperStatus=exited`、`proxyStatus=connected`であり、中継と固定宛先接続を確認した。現在の記録は[読み取り専用SSH接続試験 引継ぎ記録](Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md)を参照する。
 
 Fetch、Pull、Push、秘密鍵生成、パスフレーズ変更、鍵保管庫の初期化・削除は、この設計の対象外とする。
