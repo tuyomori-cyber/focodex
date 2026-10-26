@@ -22,6 +22,8 @@ python3 scripts/install_host.py
 Hostは`~/.local/lib/focodex/`にコピーし、Firefoxへの登録は`~/.mozilla/native-messaging-hosts/focodex.json`へ保存する。
 Pythonの実行パスも登録時に固定する。Hostのコードを変更したら再実行する。
 
+専用SSH Agentの復元、固定鍵の登録、日常確認、更新時の注意は[専用Agentの復元と秘密鍵登録：導入・運用・保守](docs/dedicated-ssh-agent-operations.md)を参照。
+
 初回に`~/.config/focodex/config.json`を作成する。既存の設定は上書きしない。
 最初の登録対象はこの`focodex`リポジトリ。旧形式の設定では各プロジェクトが単独ワークスペースとして扱われ、権限範囲は広がらない。複数リポジトリを同じ権限で扱う場合だけ、`workspaces`へ明示的に登録する。プロジェクトの追加・移動やCodexのパス変更は、この設定を手動編集する。
 
