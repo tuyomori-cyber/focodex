@@ -276,7 +276,7 @@ class HostTests(unittest.TestCase):
         host.rpc_buffer = bytearray()
         host.trace = {'id': 'test', 'operation': 'models', 'started': time.monotonic(), 'available': True}
         snapshot = {'available': True, 'states': {'zombie': 1}, 'unreadable': 0, 'scanned': 1, 'truncated': False}
-        with mock.patch.object(host_module.os, 'killpg', side_effect=[ProcessLookupError, None]), \
+        with mock.patch.object(host_module.os, 'killpg', side_effect=lambda _pid, sig: None if sig == 0 else (_ for _ in ()).throw(ProcessLookupError())), \
              mock.patch.object(host_module, 'process_group_summary', return_value=snapshot), \
              mock.patch.object(host_module.diagnostics, 'write_operation_diagnostic', return_value=True) as write:
             result = host.cleanup()
@@ -285,6 +285,58 @@ class HostTests(unittest.TestCase):
         self.assertEqual(next(e for e in events if e['stage'] == 'cleanup_signal')['outcome'], 'group-gone')
         self.assertEqual(next(e for e in events if e['stage'] == 'cleanup_group_check')['snapshot'], snapshot)
         self.assertNotIn('123456789', json.dumps(events))
+
+    def test_cleanup_group_check_retries_and_preserves_uncertain_state(self):
+        for outcome in ('immediate', 'delayed', 'timeout', 'permission'):
+            with self.subTest(outcome=outcome), mock.patch.object(host_module, 'CONFIG', self.config):
+                host = host_module.Host.__new__(host_module.Host)
+                host.process = mock.Mock(pid=123456789)
+                host.process.wait.return_value = -9
+                host.selector = mock.Mock()
+                host.lock = None
+                host.execution_token = 'test-token'
+                host.cleanup_uncertain = False
+                host.rpc_buffer = bytearray()
+                host.trace = {'id': 'test', 'operation': 'models', 'started': 0, 'available': True}
+                host_module.atomic_json(host_module.execution_path(), {
+                    'version': 1, 'token': 'test-token', 'bootId': host_module.boot_id()})
+                now = [0.0]
+                checks = [0]
+
+                def killpg(_pid, sig):
+                    if sig != 0:
+                        raise ProcessLookupError()
+                    checks[0] += 1
+                    if outcome == 'permission':
+                        raise PermissionError(1, 'denied')
+                    if outcome == 'immediate' or outcome == 'delayed' and checks[0] == 4:
+                        raise ProcessLookupError()
+
+                def sleep(seconds):
+                    now[0] += seconds
+
+                with mock.patch.object(host_module.os, 'killpg', side_effect=killpg), \
+                     mock.patch.object(host_module.time, 'monotonic', side_effect=lambda: now[0]), \
+                     mock.patch.object(host_module.time, 'sleep', side_effect=sleep), \
+                     mock.patch.object(host_module, 'process_group_summary', return_value={'available': False}), \
+                     mock.patch.object(host_module.diagnostics, 'write_operation_diagnostic', return_value=True) as write:
+                    if outcome == 'permission':
+                        with self.assertRaises(PermissionError):
+                            host.cleanup()
+                    else:
+                        result = host.cleanup()
+                        self.assertEqual(result['processGroupGone'], outcome in ('immediate', 'delayed'))
+                event = next(call.args[0] for call in write.call_args_list
+                             if call.args[0]['stage'] == 'cleanup_group_check')
+                self.assertEqual(event['attempts'], checks[0])
+                self.assertEqual(event['waitedMs'], {'immediate': 0, 'delayed': 150, 'timeout': 1000, 'permission': 0}[outcome])
+                self.assertEqual(event['outcome'], {'immediate': 'gone', 'delayed': 'gone', 'timeout': 'present', 'permission': 'error'}[outcome])
+                self.assertEqual(host_module.execution_path().exists(), outcome in ('timeout', 'permission'))
+                self.assertEqual(host.cleanup_uncertain, outcome in ('timeout', 'permission'))
+                if host_module.execution_path().exists():
+                    with self.assertRaisesRegex(ValueError, '終了が未確認'):
+                        host_module.require_confirmed_idle()
+                    host_module.remove_execution_state()
 
     def test_failed_run_records_rpc_stage_without_prompt_or_response(self):
         self.assertEqual(self.run_prompt('rpc-error')['type'], 'started')
@@ -666,7 +718,7 @@ class HostTests(unittest.TestCase):
             self.assertIsNone(host.lock)
             self.assertTrue(host_module.execution_path().exists())
             # A later cleanup still cannot prove the process group disappeared.
-            with mock.patch.object(host_module.os, 'killpg', side_effect=[ProcessLookupError, None]):
+            with mock.patch.object(host_module.os, 'killpg', side_effect=lambda _pid, sig: None if sig == 0 else (_ for _ in ()).throw(ProcessLookupError())):
                 result = host.cleanup()
             self.assertFalse(result['processGroupGone'])
             self.assertTrue(host.cleanup_uncertain)

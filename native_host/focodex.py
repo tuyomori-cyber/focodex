@@ -627,20 +627,33 @@ class Host:
                             time.sleep(0.02)
                 process_state['leaderExitCode'] = process.wait(timeout=3)
                 self.trace_event('cleanup_leader_exit', returnCode=process_state['leaderExitCode'])
-                try:
-                    os.killpg(process.pid, 0)
-                except ProcessLookupError:
-                    process_state['processGroupGone'] = True
-                except OSError as error:
-                    self.trace_event('cleanup_group_check', outcome='error', errno=error.errno)
-                    raise
+                check_started = time.monotonic()
+                deadline = check_started + 1
+                attempts = 0
+                while True:
+                    attempts += 1
+                    try:
+                        os.killpg(process.pid, 0)
+                    except ProcessLookupError:
+                        process_state['processGroupGone'] = True
+                        break
+                    except OSError as error:
+                        self.trace_event('cleanup_group_check', outcome='error', errno=error.errno,
+                                         attempts=attempts, waitedMs=round((time.monotonic() - check_started) * 1000))
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(0.05, remaining))
+                waited_ms = round((time.monotonic() - check_started) * 1000)
                 if not process_state['processGroupGone']:
                     self.cleanup_uncertain = True
                     if getattr(self, 'trace', None):
                         self.trace_event('cleanup_group_check', outcome='present',
+                                         attempts=attempts, waitedMs=waited_ms,
                                          snapshot=process_group_summary(process.pid))
                 else:
-                    self.trace_event('cleanup_group_check', outcome='gone')
+                    self.trace_event('cleanup_group_check', outcome='gone', attempts=attempts, waitedMs=waited_ms)
                 process.stdin.close()
                 process.stdout.close()
                 self.process = None
