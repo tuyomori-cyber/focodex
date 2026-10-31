@@ -1,0 +1,12 @@
+[tuyomori@fedora ~]$ pgrep -af 'codex|focodex'
+ps -eo pid,ppid,pgid,sid,stat,cmd | grep -E '[c]odex|[f]ocodex'
+2457 /usr/bin/ssh-agent -D -a /run/user/1000/focodex/remote-agent.sock
+7312 /usr/bin/python3 /home/tuyomori/.local/lib/focodex/focodex.py /home/tuyomori/.mozilla/native-messaging-hosts/focodex.json focodex@foxbook.example
+   2457    2078    2457    2457 Ss   /usr/bin/ssh-agent -D -a /run/user/1000/focodex/remote-agent.sock
+   7312    2491    2353    2353 S+   /usr/bin/python3 /home/tuyomori/.local/lib/focodex/focodex.py /home/tuyomori/.mozilla/native-messaging-hosts/focodex.json focodex@foxbook.example
+   7382    7092    7381    7092 S+   grep --color=auto -E [c]odex|[f]ocodex
+
+[tuyomori@fedora ~]$ pgrep -af 'codex|focodex'
+ps -eo pid,ppid,pgid,sid,stat,cmd | grep -E '[c]odex|[f]ocodex'
+   8333    7092    8332    7092 S+   grep --color=auto -E [c]odex|[f]ocodex
+[tuyomori@fedora ~]$ 

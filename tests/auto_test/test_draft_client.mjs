@@ -21,7 +21,7 @@ const port = {onMessage: {addListener(fn) { this.emit = fn; }}, onDisconnect: {a
     this.onMessage.emit({rpc: message.rpc, buffer: [{requestId: 'id', text: '音声の文章'}]});
   }};
 const window = {controls() {}};
-vm.runInNewContext(fs.readFileSync(new URL('../extension/draft-client.js', import.meta.url), 'utf8'), {
+vm.runInNewContext(fs.readFileSync(new URL('../../extension/draft-client.js', import.meta.url), 'utf8'), {
   window, document: {getElementById: id => elements[id], createElement: () => new Element()},
   browser: {runtime: {connect: () => port, onMessage: {addListener() {}}}},
   Event: class {constructor(type) { this.type = type; }}, setTimeout, clearTimeout

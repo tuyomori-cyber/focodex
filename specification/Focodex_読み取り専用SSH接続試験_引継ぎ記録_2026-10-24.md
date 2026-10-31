@@ -61,7 +61,7 @@ Xubuntu作業ツリーでは、追加診断に関する6件の回帰試験とPyt
 
 1. この文書、`TODO.md`、`docs/verification.md`、`specification/Focodex_専用SSH認証管理設計案.md`を読む。
 2. `git status --short`と`git diff --check`で引継ぎ時点の差分を確認する。reset・checkout・ログ削除はしない。
-3. `python3 -m unittest tests/test_git_ops.py -v`を実行して、Git回帰試験全体の基準を確認する。
+3. `python3 -m unittest discover -s tests/auto_test -p test_git_ops.py -v`を実行して、Git回帰試験全体の基準を確認する。
 4. 読み取り専用SSH接続が成功した固定経路を前提に、Fetch時に許可するGit設定・書込範囲・参照更新の原子性を設計する。追加診断はホスト・URL・鍵・パスフレーズ・生のSSH出力を永続化しないこと。
 5. Fetch単独の安全設計・実装・実機検証が済むまで、Pull / Pushを実装・実行しない。
 

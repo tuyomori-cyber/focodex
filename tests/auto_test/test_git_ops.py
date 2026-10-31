@@ -13,7 +13,7 @@ import time
 import unittest
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'native_host'))
 import git_ops
 import git_remote

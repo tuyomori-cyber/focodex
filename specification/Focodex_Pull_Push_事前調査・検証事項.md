@@ -123,7 +123,7 @@ Pull・PushをGit CLI＋専用Sandboxで安全に単純実装できるか、Surf
 | 基盤 | Linux、`/usr/bin/bwrap`、`/usr/bin/git`、`/usr/bin/ssh` が存在 | SurfaceのFedora/Cage/Firefoxと同一視しない。 |
 | 現行ローカルGit経路 | `git_ops.environment()` は最小環境を構築し、`SSH_AUTH_SOCK`を継承しない | Stage/Commit用の経路をリモート操作へ転用しない。専用Sandboxと明示的な認証受渡しが必要。 |
 
-`tests/test_git_ops.py`で、ローカルGit経路が`SSH_AUTH_SOCK`および呼出元の`GIT_SSH_COMMAND`を継承しないことを回帰試験化した。
+`tests/auto_test/test_git_ops.py`で、ローカルGit経路が`SSH_AUTH_SOCK`および呼出元の`GIT_SSH_COMMAND`を継承しないことを回帰試験化した。
 
 次はSurfaceで、SSHログインシェルとFirefox Native Hostの環境を**値を表示せずに**比較する。確認対象は、SSH Agentソケットの有無・ソケット種別、`HOME`/`PATH`の実効値、`bwrap`/Git/SSHの存在、SELinux状態、対象リポジトリのcurrent branch/upstreamである。この段階でもFetch/Pushは実行しない。
 

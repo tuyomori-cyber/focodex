@@ -176,7 +176,7 @@ FocodexのHost関連ソースを更新したら、リポジトリの変更だけ
 
 保守時は、少なくとも次を確認する。
 
-1. `python3 -m unittest tests/test_remote_agent.py -v`でAgent準備の回帰試験を実行する。
+1. `python3 -m unittest discover -s tests/auto_test -p test_remote_agent.py -v`でAgent準備の回帰試験を実行する。
 2. `keyring-status`、`config-status`、`secret-status`、`status`が期待状態になることを確認する。
 3. Focodexのリモート事前診断が専用Agentを利用可能と判断することを確認する。
 4. OSログアウト・再ログイン・再起動後に、対象のグラフィカルセッション経路で`ready`へ復元することを確認する。
@@ -199,6 +199,6 @@ Surfaceでは、GDM/PAMによるGNOME Keyring Loginコレクションの自動�
 
 - 実装：[`native_host/remote_agent.py`](../native_host/remote_agent.py)、[`native_host/git_remote.py`](../native_host/git_remote.py)
 - 配置とunit：[`scripts/install_host.py`](../scripts/install_host.py)、[`systemd/focodex-remote-agent.service`](../systemd/focodex-remote-agent.service)、[`systemd/focodex-remote-key.service`](../systemd/focodex-remote-key.service)
-- 自動試験：[`tests/test_remote_agent.py`](../tests/test_remote_agent.py)
+- 自動試験：[`tests/auto_test/test_remote_agent.py`](../tests/auto_test/test_remote_agent.py)
 - Surface検証記録：[`docs/verification.md`](verification.md)、[`specification/Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md`](../specification/Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md)
 - 設計上の制約：[`specification/Focodex_専用SSH認証管理設計案.md`](../specification/Focodex_専用SSH認証管理設計案.md)

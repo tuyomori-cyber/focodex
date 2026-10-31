@@ -9,7 +9,7 @@ function harness(saved = {}) {
   const data = structuredClone(saved), effects = {reads: 0, writes: 0}, env = {failWrite: false};
   const runtime = {id: 'focodex@foxbook.example', onMessageExternal: event(), onConnect: event(), sendMessage: async () => {}};
   const browser = {runtime, storage: {local: {get: async keys => { effects.reads++; const out = {}; for (const key of Array.isArray(keys) ? keys : [keys]) out[key] = structuredClone(data[key]); return out; }, set: async values => { effects.writes++; if (env.failWrite) throw Error('disk'); Object.assign(data, structuredClone(values)); }}}};
-  vm.runInNewContext(fs.readFileSync(new URL('../extension/draft-background.js', import.meta.url), 'utf8'), {browser, URL});
+  vm.runInNewContext(fs.readFileSync(new URL('../../extension/draft-background.js', import.meta.url), 'utf8'), {browser, URL});
   return {data, effects, env, external: (message, sender = SOURCE) => runtime.onMessageExternal.emit(message, sender)[0]};
 }
 { const h = harness(); assert.equal((await h.external(receive(1), {...SOURCE, id: 'other'})).reason, 'unauthorized'); assert.equal((await h.external({...receive(1), extra: true})).reason, 'invalid_message'); assert.deepEqual(h.effects, {reads: 0, writes: 0}); }

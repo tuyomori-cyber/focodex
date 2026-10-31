@@ -23,7 +23,7 @@ const port = {
   onDisconnect: {addListener(callback) { this.emit = callback; }}
 };
 let sequence = 0;
-vm.runInNewContext(fs.readFileSync(new URL('../extension/probe.js', import.meta.url), 'utf8'), {
+vm.runInNewContext(fs.readFileSync(new URL('../../extension/probe.js', import.meta.url), 'utf8'), {
   window: pageWindow,
   document: {getElementById: id => elements[id], createElement: () => new Element()},
   Option: function (label, value) { this.textContent = label; this.value = value; },

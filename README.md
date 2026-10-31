@@ -59,6 +59,8 @@ Pythonの実行パスも登録時に固定する。Hostのコードを変更し�
 
 ## Firefoxでの検証
 
+終了確認・停止・切断経路の実機試験は[実機テスト仕様書](tests/device_test/終了確認・切断経路テスト仕様書.md)を参照する。自動テストは `tests/auto_test/` に配置する。
+
 1. `about:debugging#/runtime/this-firefox`を開き、「一時的なアドオンを読み込む」から`extension/manifest.json`を選ぶ。
 2. ツールバーの「Focodex 接続検証」を押して画面を開く。
 3. 「Hostへ接続」を押し、ワークスペース、開始プロジェクト、許可対象のリポジトリ一覧が表示されることを確認する。
@@ -67,7 +69,7 @@ Pythonの実行パスも登録時に固定する。Hostのコードを変更し�
 6. 再送しても1件ずつ実行されることを確認する。モデル拒否が実際に起きた場合は、指示文を保持したまま別モデルを選んで再送できる。一覧取得に失敗した場合は「モデル一覧を再取得」で再試行できる。拒否されるモデルが候補にない場合、失敗後の再送は模擬試験の確認で足りる。モデル取得・Codex実行で操作不可になった場合は、状態欄の`追跡ID`と`~/.local/state/focodex/operation-diagnostics.jsonl`を対応させて、直前の段階と固定エラー分類を確認する。指示文・応答本文・モデル名・生カーソルは保存しない。詳細は[操作診断トレース設計](specification/操作診断トレース設計.md)を参照。
 7. 長く続く実行では「停止」を押す。「停止要求中…」の後、Codexの中断結果または専用プロセス群の終了確認を経て「停止済み」と表示する。自然に完了した場合は「完了」と表示する。
 
-停止後は状態の直下に、Codexから受信した終了状態、中断要求への応答、5秒後の強制終了の有無、専用プロセス群の消滅確認を表示する。詳細な値は「接続・実行情報」の`stopDiagnostics`で確認できる。専用プロセス群の消滅を確認できない場合は失敗として表示し、同じHostからの再実行を拒否する。
+停止後の終了状態、中断要求への応答、5秒後の強制終了の有無、専用プロセス群の消滅確認は「接続・実行情報」の`stopDiagnostics`で確認できる。状態の直下には追跡IDがある場合はそれを表示する。専用プロセス群の消滅を確認できない場合は失敗として表示し、同じHostからの再実行を拒否する。
 
 従来の試験ではコマンド・ファイル変更承認を表示したが、v0.1.2の権限方針では汎用承認を禁止する。外部読み取りの承認UIはMVP対象外とし、Git pushは専用操作を実装するまで利用できない。ファイル変更の差分は対応する`item/started`から取得する。汎用要求では内容を表示しても承認ボタンは出さず、拒否か停止のみ可能。ネットワークや権限変更など、適切に表示できない要求も自動許可しない。追加質問では選択肢または自由文を入力して明示的に送信する。待機中も停止できる。
 
@@ -150,10 +152,10 @@ SurfaceのFedoraではまだFocodexのpermission profileを試していない。
 ## ブラウザを使わないHost試験
 
 ```bash
-python3 -m unittest discover -s tests -v
-node tests/test_probe.mjs
-node tests/test_draft.mjs
-node tests/test_draft_client.mjs
+python3 -m unittest discover -s tests/auto_test -v
+node tests/auto_test/test_probe.mjs
+node tests/auto_test/test_draft.mjs
+node tests/auto_test/test_draft_client.mjs
 node --check extension/probe.js
 node --check extension/background.js
 ```
@@ -190,7 +192,7 @@ python3 scripts/probe_host.py --model gpt-5.6-sol
 外部APIは許可したfox-voice-editor編集ページからの文章追加だけです。送信元検証と公開操作は[API契約](specification/draft-api-v1.md)、実機で未確認の項目は[検証記録](docs/verification.md)を参照してください。
 
 ```bash
-node tests/test_draft.mjs
+node tests/auto_test/test_draft.mjs
 ```
 
 
