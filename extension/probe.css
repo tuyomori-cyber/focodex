@@ -40,7 +40,10 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .received-item-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
 .received-item-actions button { margin-top: .7rem; }
 
-#git-files label { padding: .7rem; margin: 0; }
+#git-stage-all-label { padding: .7rem; margin: 0; }
+#git-files .git-file-summary { display: flex; align-items: center; gap: .7rem; }
+#git-files .git-file-name { flex: 1; min-width: 0; }
+#git-files .git-file-stage { display: flex; flex: none; align-items: center; gap: .35rem; margin: 0; padding: 0; font-weight: normal; }
 #git-files input[type="checkbox"] { width: 1.3rem; height: 1.3rem; vertical-align: middle; }
 #commit-review { border: 2px solid currentColor; border-radius: .5rem; padding: .8rem; margin-top: 1rem; }
 #commit-files { margin: .4rem 0 1rem; padding-inline-start: 1.5rem; }

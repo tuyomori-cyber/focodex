@@ -237,6 +237,55 @@ class HostTests(unittest.TestCase):
         self.assertNotIn('test-first', contents)
         self.assertEqual((self.state / 'focodex' / 'operation-diagnostics.jsonl').stat().st_mode & 0o777, 0o600)
 
+    def test_model_catalog_rejects_unconfirmed_cleanup(self):
+        host = host_module.Host.__new__(host_module.Host)
+        host.trace = {'id': 'test', 'operation': 'models', 'requestId': 'models-test',
+                      'started': time.monotonic(), 'terminal': False, 'available': True}
+        host.operation = 'models'
+        host.model_page = 1
+        host.model_rows = []
+        host.cursors = set()
+        host.catalogs = {}
+        host.workspace_id = 'workspace'
+        host.cwd = '/project'
+        host.request_id = 'models-test'
+        host.cleanup = mock.Mock(return_value={'processGroupGone': False})
+        with mock.patch.object(host_module, 'send') as send, mock.patch.object(host_module.diagnostics, 'write_operation_diagnostic', return_value=True) as write:
+            host.event({'id': 4, 'result': {'data': [{'model': 'example'}], 'nextCursor': None}})
+        message = send.call_args.args[0]
+        self.assertEqual(message['type'], 'error')
+        self.assertIn('終了を確認できません', message['error'])
+        self.assertFalse(host.catalogs)
+        self.assertEqual(write.call_args.args[0]['errorCode'], 'process-unconfirmed')
+        self.assertEqual(write.call_args.args[0]['status'], 'failed')
+
+    def test_process_group_snapshot_counts_own_process_without_identifiers(self):
+        result = host_module.process_group_summary(os.getpgrp())
+        self.assertTrue(result['available'])
+        self.assertGreaterEqual(sum(result['states'].values()), 1)
+        self.assertEqual(set(result), {'available', 'states', 'unreadable', 'scanned', 'truncated'})
+
+    def test_uncertain_cleanup_records_signal_and_state_summary(self):
+        host = host_module.Host.__new__(host_module.Host)
+        host.process = mock.Mock(pid=123456789)
+        host.process.wait.return_value = -9
+        host.selector = mock.Mock()
+        host.lock = None
+        host.execution_token = None
+        host.cleanup_uncertain = False
+        host.rpc_buffer = bytearray()
+        host.trace = {'id': 'test', 'operation': 'models', 'started': time.monotonic(), 'available': True}
+        snapshot = {'available': True, 'states': {'zombie': 1}, 'unreadable': 0, 'scanned': 1, 'truncated': False}
+        with mock.patch.object(host_module.os, 'killpg', side_effect=[ProcessLookupError, None]), \
+             mock.patch.object(host_module, 'process_group_summary', return_value=snapshot), \
+             mock.patch.object(host_module.diagnostics, 'write_operation_diagnostic', return_value=True) as write:
+            result = host.cleanup()
+        self.assertFalse(result['processGroupGone'])
+        events = [call.args[0] for call in write.call_args_list]
+        self.assertEqual(next(e for e in events if e['stage'] == 'cleanup_signal')['outcome'], 'group-gone')
+        self.assertEqual(next(e for e in events if e['stage'] == 'cleanup_group_check')['snapshot'], snapshot)
+        self.assertNotIn('123456789', json.dumps(events))
+
     def test_failed_run_records_rpc_stage_without_prompt_or_response(self):
         self.assertEqual(self.run_prompt('rpc-error')['type'], 'started')
         result = self.result()

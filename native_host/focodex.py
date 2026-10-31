@@ -226,6 +226,40 @@ def boot_id():
     return str(uuid.UUID(Path('/proc/sys/kernel/random/boot_id').read_text().strip()))
 
 
+def process_group_summary(pgid):
+    """Best-effort /proc snapshot; never retain process names, paths or IDs."""
+    counts = {'running': 0, 'sleeping': 0, 'uninterruptible': 0,
+              'zombie': 0, 'stopped': 0, 'other': 0}
+    unreadable = 0
+    scanned = 0
+    truncated = False
+    try:
+        with os.scandir('/proc') as entries:
+            for entry in entries:
+                if not entry.name.isdecimal():
+                    continue
+                if scanned >= 8192:
+                    truncated = True
+                    break
+                scanned += 1
+                try:
+                    # comm may contain spaces and parentheses; fields after the
+                    # final ')' start with state, parent PID and process group.
+                    with open('/proc/' + entry.name + '/stat', encoding='utf-8') as stream:
+                        fields = stream.read(8192).rsplit(')', 1)[1].split()
+                    if int(fields[2]) != pgid:
+                        continue
+                    kind = {'R': 'running', 'S': 'sleeping', 'D': 'uninterruptible',
+                            'Z': 'zombie', 'T': 'stopped', 't': 'stopped'}.get(fields[0], 'other')
+                    counts[kind] += 1
+                except (OSError, ValueError, IndexError):
+                    unreadable += 1
+    except OSError:
+        return {'available': False}
+    return {'available': True, 'states': counts, 'unreadable': unreadable,
+            'scanned': scanned, 'truncated': truncated}
+
+
 def execution_path():
     return CONFIG.with_suffix('.execution.json')
 
@@ -504,7 +538,7 @@ class Host:
         return {'traceId': trace_id, 'diagnosticsUnavailable': not available}
 
     def trace_event(self, stage, **fields):
-        if not self.trace:
+        if not getattr(self, 'trace', None):
             return
         event = {'traceId': self.trace['id'], 'operation': self.trace['operation'], 'stage': stage,
                  'elapsedMs': round((time.monotonic() - self.trace['started']) * 1000)}
@@ -562,6 +596,7 @@ class Host:
         try:
             if self.process:
                 process = self.process
+                self.trace_event('cleanup_started')
                 process_state = {'leaderExitCode': None, 'processGroupGone': False,
                                  'terminationSignal': None}
                 try:
@@ -573,8 +608,14 @@ class Host:
                     try:
                         os.killpg(process.pid, sig)
                         process_state['terminationSignal'] = signal.Signals(sig).name
+                        self.trace_event('cleanup_signal', signal=signal.Signals(sig).name, outcome='sent')
                     except ProcessLookupError:
+                        self.trace_event('cleanup_signal', signal=signal.Signals(sig).name, outcome='group-gone')
                         break
+                    except OSError as error:
+                        self.trace_event('cleanup_signal', signal=signal.Signals(sig).name,
+                                         outcome='error', errno=error.errno)
+                        raise
                     if sig == signal.SIGTERM:
                         deadline = time.monotonic() + 1
                         while time.monotonic() < deadline:
@@ -585,12 +626,21 @@ class Host:
                                 break
                             time.sleep(0.02)
                 process_state['leaderExitCode'] = process.wait(timeout=3)
+                self.trace_event('cleanup_leader_exit', returnCode=process_state['leaderExitCode'])
                 try:
                     os.killpg(process.pid, 0)
                 except ProcessLookupError:
                     process_state['processGroupGone'] = True
+                except OSError as error:
+                    self.trace_event('cleanup_group_check', outcome='error', errno=error.errno)
+                    raise
                 if not process_state['processGroupGone']:
                     self.cleanup_uncertain = True
+                    if getattr(self, 'trace', None):
+                        self.trace_event('cleanup_group_check', outcome='present',
+                                         snapshot=process_group_summary(process.pid))
+                else:
+                    self.trace_event('cleanup_group_check', outcome='gone')
                 process.stdin.close()
                 process.stdout.close()
                 self.process = None
@@ -603,8 +653,14 @@ class Host:
                     self.execution_token = None
                 else:
                     self.cleanup_uncertain = True
-        except BaseException:
+        except BaseException as error:
             self.cleanup_uncertain = True
+            reason = ('wait-timeout' if isinstance(error, subprocess.TimeoutExpired) else
+                      'os-error' if isinstance(error, OSError) else 'other')
+            fields = {'reason': reason}
+            if isinstance(error, OSError) and error.errno is not None:
+                fields['errno'] = error.errno
+            self.trace_event('cleanup_failed', **fields)
             raise
         finally:
             # OS locks disappear on Host death. The durable record does not.
@@ -1191,9 +1247,17 @@ class Host:
                 self.rpc('model/list', {'limit': 100, 'includeHidden': False, 'cursor': cursor}, 4)
                 return
             rows = list({row['model']: row for row in self.model_rows if isinstance(row['model'], str)}.values())
+            process_state = self.cleanup()
+            if not process_state or not process_state['processGroupGone']:
+                self.trace_terminal('failed', 'process-unconfirmed', process_state)
+                send({'type': 'error', 'id': self.request_id,
+                      'error': 'モデル一覧は取得しましたが、専用プロセス群の終了を確認できません。再実行せず状態を確認してください。',
+                      **self.trace_details()})
+                self.request_id = None
+                self.clear_trace()
+                return
             self.catalogs[(self.workspace_id, self.cwd)] = {row['model'] for row in rows}
             message = {'type': 'models', 'id': self.request_id, 'models': rows}
-            process_state = self.cleanup()
             self.trace_terminal('completed', process_state=process_state)
             message.update(self.trace_details())
             self.request_id = None

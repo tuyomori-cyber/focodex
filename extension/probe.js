@@ -52,6 +52,9 @@ function showCommitReview(message) {
 function resetGit() {
   gitSnapshotToken = null; gitCanModify = false; gitSelections.clear(); clearGitReview();
   $("git-message").textContent = ""; $("git-files").replaceChildren();
+  $("git-stage-all-label").hidden = true;
+  $("git-stage-all").checked = false;
+  $("git-stage-all").indeterminate = false;
 }
 function currentWorkspace() { return workspaces.get($("workspace").value); }
 function currentProject() { return $("project").value; }
@@ -265,16 +268,33 @@ function gitStatusLabel(code) {
 function showGitFiles(files) {
   $("git-files").replaceChildren();
   gitSelections.clear();
+  $("git-stage-all-label").hidden = !files.length;
   if (!files.length) {
     $("git-files").textContent = "変更なし";
+    controls();
     return;
   }
   $("git-files").textContent = "";
   for (const file of files) {
     const details = document.createElement("details");
     const summary = document.createElement("summary");
-    summary.textContent = `${file.path} — ${gitStatusLabel(file.status)}` +
+    summary.className = "git-file-summary";
+    const name = document.createElement("span");
+    name.className = "git-file-name";
+    name.textContent = `${file.path} — ${gitStatusLabel(file.status)}` +
       (file.originalPath ? `（元: ${file.originalPath}）` : "");
+    const label = document.createElement("label"), input = document.createElement("input");
+    label.className = "git-file-stage";
+    input.type = "checkbox"; input.checked = false;
+    const alreadyStaged = file.status !== "??" && file.status[0] !== " ";
+    input.stageable = !alreadyStaged && (file.status === "??" || file.status[1] !== " ");
+    input.disabled = !gitCanModify || !input.stageable;
+    input.addEventListener("change", controls);
+    // The selector belongs in the disclosure title, but selecting it must not
+    // also open or close the diff.
+    label.addEventListener("click", event => event.stopPropagation());
+    label.append(input, alreadyStaged ? " ステージ済み" : " ステージ");
+    summary.append(name, label);
     details.append(summary);
     for (const [title, diff] of [["未ステージ・未追跡", file.unstagedDiff],
                                   ["ステージ済み", file.stagedDiff]]) {
@@ -290,17 +310,10 @@ function showGitFiles(files) {
       note.textContent = "表示できるテキスト差分はありません。";
       details.append(note);
     }
-    const label = document.createElement("label"), input = document.createElement("input");
-    input.type = "checkbox"; input.checked = false;
-    const alreadyStaged = file.status !== "??" && file.status[0] !== " ";
-    input.stageable = !alreadyStaged && (file.status === "??" || file.status[1] !== " ");
-    input.disabled = !gitCanModify || !input.stageable;
-    input.addEventListener("change", controls);
-    label.append(input, alreadyStaged ? " ステージ済み（解除は未対応）" : " このファイルをステージ");
-    details.append(label);
     gitSelections.set(file.path, input);
     $("git-files").append(details);
   }
+  controls();
 }
 function fetchModels() {
   if (!port || busy || !$("project").value) return;
@@ -346,6 +359,13 @@ $("git-stage").addEventListener("click", () => {
   if (!files.length) return;
   clearGitReview();
   gitRequest("git_stage", {files, snapshotToken: gitSnapshotToken});
+});
+$("git-stage-all").addEventListener("change", () => {
+  const selectAll = $("git-stage-all").checked;
+  for (const input of gitSelections.values()) {
+    if (!input.disabled) input.checked = selectAll;
+  }
+  controls();
 });
 $("git-review").addEventListener("click", () => {
   if (!gitCanModify || busy) return;
@@ -464,7 +484,12 @@ function controls() {
   $("git-fetch").disabled = gitBusy;
   $("git-pull").disabled = gitBusy;
   $("git-push").disabled = gitBusy;
-  $("git-stage").disabled = gitBusy || !gitSnapshotToken || ![...gitSelections.values()].some(input => input.checked && !input.disabled);
+  const stageableSelections = [...gitSelections.values()].filter(input => input.stageable);
+  const selectedStageable = stageableSelections.filter(input => input.checked && !input.disabled);
+  $("git-stage").disabled = gitBusy || !gitSnapshotToken || !selectedStageable.length;
+  $("git-stage-all").disabled = gitBusy || !gitCanModify || !stageableSelections.length;
+  $("git-stage-all").checked = stageableSelections.length > 0 && selectedStageable.length === stageableSelections.length;
+  $("git-stage-all").indeterminate = selectedStageable.length > 0 && selectedStageable.length < stageableSelections.length;
   $("git-review").disabled = gitBusy || !gitCanModify || !$("commit-message").value.trim();
   $("git-commit").disabled = gitBusy || !gitReviewToken;
   $("commit-message").disabled = busy;
