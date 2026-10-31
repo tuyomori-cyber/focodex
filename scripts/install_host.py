@@ -20,6 +20,9 @@ def install(home, codex):
     host = target / 'focodex.py'
     shutil.copyfile(ROOT / 'native_host/focodex.py', host)
     host.chmod(0o700)
+    diagnostics_module = target / 'diagnostics.py'
+    shutil.copyfile(ROOT / 'native_host/diagnostics.py', diagnostics_module)
+    diagnostics_module.chmod(0o600)
     git_module = target / 'git_ops.py'
     shutil.copyfile(ROOT / 'native_host/git_ops.py', git_module)
     git_module.chmod(0o600)

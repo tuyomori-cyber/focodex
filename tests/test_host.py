@@ -163,11 +163,15 @@ class HostTests(unittest.TestCase):
         fake.chmod(0o700)
         settings_temp = tempfile.TemporaryDirectory()
         self.addCleanup(settings_temp.cleanup)
+        state_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(state_temp.cleanup)
         self.config = Path(settings_temp.name) / 'config.json'
         self.config.write_text(json.dumps({'codex': str(fake), 'projects': {
             'test': {'name': 'テスト', 'path': str(root)}}}))
         self.pid = root / 'pid'
-        self.env = {**os.environ, 'FOCODEX_CONFIG': str(self.config), 'FAKE_PID': str(self.pid)}
+        self.state = Path(state_temp.name)
+        self.env = {**os.environ, 'FOCODEX_CONFIG': str(self.config), 'FAKE_PID': str(self.pid),
+                    'XDG_STATE_HOME': str(self.state)}
         self.host = self.new_host()
 
     def new_host(self, env=None):
@@ -184,6 +188,10 @@ class HostTests(unittest.TestCase):
         message = probe.read_message(self.host, 8)
         self.assertEqual(message['type'], 'result')
         return message
+
+    def diagnostic_events(self):
+        path = self.state / 'focodex' / 'operation-diagnostics.jsonl'
+        return [json.loads(line) for line in path.read_text().splitlines()]
 
     def test_round_trip_and_repeated_run(self):
         probe.write_message(self.host, {'type': 'projects', 'id': 'p'})
@@ -213,6 +221,43 @@ class HostTests(unittest.TestCase):
             probe.write_message(self.host, {'type': 'run', 'id': 'invalid', 'projectId': 'test',
                                            'model': model, 'text': 'hello'})
             self.assertEqual(probe.read_message(self.host)['type'], 'error')
+
+    def test_model_listing_writes_content_free_page_trace(self):
+        probe.write_message(self.host, {'type': 'models', 'id': 'm', 'projectId': 'test'})
+        self.assertEqual(probe.read_message(self.host)['type'], 'started')
+        catalog = probe.read_message(self.host)
+        self.assertEqual(catalog['type'], 'models')
+        self.assertRegex(catalog['traceId'], r'^[0-9a-f-]{36}$')
+        events = self.diagnostic_events()
+        self.assertEqual({event['traceId'] for event in events}, {catalog['traceId']})
+        self.assertEqual([event['page'] for event in events if event['stage'] == 'model_page_received'], [1, 2])
+        self.assertEqual(events[-1]['stage'], 'terminal')
+        self.assertEqual(events[-1]['status'], 'completed')
+        contents = (self.state / 'focodex' / 'operation-diagnostics.jsonl').read_text()
+        self.assertNotIn('test-first', contents)
+        self.assertEqual((self.state / 'focodex' / 'operation-diagnostics.jsonl').stat().st_mode & 0o777, 0o600)
+
+    def test_failed_run_records_rpc_stage_without_prompt_or_response(self):
+        self.assertEqual(self.run_prompt('rpc-error')['type'], 'started')
+        result = self.result()
+        self.assertEqual(result['status'], 'failed')
+        events = self.diagnostic_events()
+        self.assertTrue(any(event['stage'] == 'rpc_error' for event in events))
+        self.assertEqual(events[-1]['status'], 'failed')
+        contents = (self.state / 'focodex' / 'operation-diagnostics.jsonl').read_text()
+        self.assertNotIn('rpc-error', contents)
+        self.assertNotIn('test failure', contents)
+
+    def test_validation_rejection_has_a_trace(self):
+        probe.write_message(self.host, {'type': 'run', 'id': 'invalid', 'projectId': 'test',
+                                       'model': 'not-listed', 'text': 'secret prompt'})
+        reply = probe.read_message(self.host)
+        self.assertEqual(reply['type'], 'error')
+        self.assertRegex(reply['traceId'], r'^[0-9a-f-]{36}$')
+        events = self.diagnostic_events()
+        self.assertEqual(events[-1]['stage'], 'terminal')
+        self.assertEqual(events[-1]['status'], 'rejected')
+        self.assertNotIn('secret prompt', (self.state / 'focodex' / 'operation-diagnostics.jsonl').read_text())
 
     def test_model_requires_catalog_from_same_connection(self):
         probe.write_message(self.host, {'type': 'run', 'id': 'invalid', 'projectId': 'test',
@@ -645,6 +690,7 @@ class HostTests(unittest.TestCase):
         manifest = json.loads((target / '.mozilla/native-messaging-hosts/focodex.json').read_text())
         self.assertTrue(os.access(manifest['path'], os.X_OK))
         self.assertEqual(manifest['allowed_extensions'], ['focodex@foxbook.example'])
+        self.assertTrue((target / '.local/lib/focodex/diagnostics.py').is_file())
         self.assertTrue((target / '.local/lib/focodex/git_ops.py').is_file())
         self.assertTrue((target / '.local/lib/focodex/git_remote.py').is_file())
         self.assertTrue((target / '.local/lib/focodex/remote_agent.py').is_file())

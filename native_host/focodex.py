@@ -18,6 +18,7 @@ import tempfile
 import time
 import uuid
 
+import diagnostics
 import git_ops
 import git_remote
 
@@ -483,8 +484,73 @@ class Host:
         self.codex_turn_status = None
         self.pending_request = None
         self.items = {}
+        self.trace = None
+        self.model_page = 0
+
+    def trace_start(self, operation, request_id):
+        self.trace = {'id': diagnostics.new_trace_id(), 'operation': operation,
+                      'requestId': request_id, 'started': time.monotonic(), 'terminal': False,
+                      'available': True}
+        self.trace_event('received')
+
+    @staticmethod
+    def trace_rejection(operation, error_code):
+        trace_id = diagnostics.new_trace_id()
+        available = diagnostics.write_operation_diagnostic({'traceId': trace_id, 'operation': operation,
+                                                            'stage': 'received', 'elapsedMs': 0})
+        available = diagnostics.write_operation_diagnostic({'traceId': trace_id, 'operation': operation,
+                                                            'stage': 'terminal', 'elapsedMs': 0,
+                                                            'status': 'rejected', 'errorCode': error_code}) and available
+        return {'traceId': trace_id, 'diagnosticsUnavailable': not available}
+
+    def trace_event(self, stage, **fields):
+        if not self.trace:
+            return
+        event = {'traceId': self.trace['id'], 'operation': self.trace['operation'], 'stage': stage,
+                 'elapsedMs': round((time.monotonic() - self.trace['started']) * 1000)}
+        event.update(fields)
+        if not diagnostics.write_operation_diagnostic(event):
+            self.trace['available'] = False
+
+    def trace_terminal(self, status, error_code=None, process_state=None):
+        if not self.trace or self.trace['terminal']:
+            return
+        fields = {'status': status}
+        if error_code:
+            fields['errorCode'] = error_code
+        if process_state is not None:
+            fields['processGroupGone'] = bool(process_state.get('processGroupGone'))
+        self.trace_event('terminal', **fields)
+        self.trace['terminal'] = True
+
+    def trace_details(self):
+        if not self.trace:
+            return {}
+        return {'traceId': self.trace['id'], 'diagnosticsUnavailable': not self.trace['available']}
+
+    def clear_trace(self):
+        self.trace = None
+
+    @staticmethod
+    def error_code(error):
+        text = str(error)
+        if '前回のCodex終了が未確認' in text:
+            return 'execution-unconfirmed'
+        if '別のFocodexタブで実行中' in text:
+            return 'locked'
+        if '設定' in text:
+            return 'configuration'
+        if 'モデル一覧' in text:
+            return 'model-catalog'
+        return 'validation'
 
     def rpc(self, method, params, rpc_id=None):
+        fields = {'method': method}
+        if rpc_id is not None:
+            fields['rpcId'] = rpc_id
+        if method == 'model/list':
+            fields['page'] = self.model_page
+        self.trace_event('rpc_sent', **fields)
         value = {'method': method, 'params': params}
         if rpc_id is not None:
             value['id'] = rpc_id
@@ -563,6 +629,9 @@ class Host:
             if not stop['process']['processGroupGone']:
                 result['status'] = 'failed'
                 result['error'] = '専用プロセス群の終了を確認できません。再実行せず状態を確認してください。'
+        self.trace_terminal(result['status'], 'process-unconfirmed' if not stop['process']['processGroupGone'] else None,
+                            stop['process'])
+        result.update(self.trace_details())
         self.request_id = None
         self.stop_requested = False
         self.interrupt_sent = False
@@ -572,6 +641,7 @@ class Host:
         self.pending_request = None
         self.items = {}
         send(result)
+        self.clear_trace()
 
     def interrupt(self):
         if self.stop_requested and not self.interrupt_sent and self.thread_id and self.turn_id:
@@ -613,6 +683,14 @@ class Host:
         if not isinstance(value, dict) or not isinstance(value.get('id'), str):
             raise ValueError('id付きのメッセージが必要です。')
         request_id = value['id']
+        operation_kind = value.get('type')
+        if operation_kind in ('run', 'models'):
+            if self.trace:
+                details = self.trace_rejection(operation_kind, 'busy')
+                error = ValueError('実行中です。同時実行は1件です。')
+                error.trace_details = details
+                raise error
+            self.trace_start(operation_kind, request_id)
         if value.get('type') == 'projects':
             data = read_config()
             _, projects, workspaces = config(data)
@@ -771,6 +849,7 @@ class Host:
         self.operation, self.model = operation, model
         self.model_rows = []
         self.cursors = set()
+        self.model_page = 0
         if operation == 'models':
             self.catalogs.pop((workspace_id, cwd), None)
         self.request_id, self.prompt = request_id, prompt
@@ -789,21 +868,24 @@ class Host:
             token = secrets.token_urlsafe(24)
             atomic_json(execution_path(), {'version': 1, 'token': token,
                         'bootId': boot_id(), 'operation': operation,
-                        'workspaceRoots': self.workspace_roots, 'startedAt': time.time()})
+                        'workspaceRoots': self.workspace_roots, 'startedAt': time.time(),
+                        'traceId': self.trace['id']})
             self.execution_token = token
             self.process = subprocess.Popen(
                 codex_args(executable, self.workspace_roots), cwd=self.cwd,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
                 start_new_session=True, bufsize=0)
+            self.trace_event('codex_started')
             self.selector.register(self.process.stdout, selectors.EVENT_READ, 'codex')
             self.rpc('initialize', {'clientInfo': {'name': 'focodex_probe',
                      'title': 'Focodex connection probe', 'version': '0.1.1'},
                      'capabilities': {'experimentalApi': True}}, 1)
         except Exception:
-            self.cleanup()
+            process_state = self.cleanup()
+            self.trace_terminal('failed', 'launch', process_state)
             self.request_id = None
             raise
-        send({'type': 'started', 'id': request_id})
+        send({'type': 'started', 'id': request_id, **self.trace_details()})
 
     def git_command(self, value):
         operation = value['type']
@@ -1062,10 +1144,13 @@ class Host:
               'approvable': approvable, 'approvalScope': 'once' if kind != 'question' else None})
 
     def event(self, value):
+        if self.trace and isinstance(value, dict) and isinstance(value.get('id'), int):
+            self.trace_event('rpc_received', rpcId=value['id'])
         if 'method' in value and 'id' in value:
             self.request_interaction(value)
             return
         if 'error' in value and 'id' in value:
+            self.trace_event('rpc_error', rpcId=value['id'])
             error = json.dumps(value['error'], ensure_ascii=False)[:4000]
             if 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted' in error:
                 error = ('CodexのLinux隔離を開始できませんでした。bwrapのループバック設定が'
@@ -1076,6 +1161,7 @@ class Host:
             self.agent_version = value['result'].get('userAgent')
             self.rpc('initialized', {})
             if self.operation == 'models':
+                self.model_page = 1
                 self.rpc('model/list', {'limit': 100, 'includeHidden': False}, 4)
             else:
                 params = {'cwd': self.cwd, 'ephemeral': True,
@@ -1085,6 +1171,10 @@ class Host:
                 self.rpc('thread/start', params, 2)
         elif value.get('id') == 4 and self.operation == 'models':
             result = value['result']
+            raw_rows = result.get('data')
+            self.trace_event('model_page_received', page=self.model_page,
+                             itemCount=len(raw_rows) if isinstance(raw_rows, list) else -1,
+                             hasNext=bool(result.get('nextCursor')))
             for row in result['data']:
                 if row.get('hidden') or 'text' not in row.get('inputModalities', ['text']):
                     continue
@@ -1097,14 +1187,18 @@ class Host:
                 if cursor in self.cursors or len(self.cursors) >= 20:
                     raise ValueError('モデル一覧のページ取得を継続できません。')
                 self.cursors.add(cursor)
+                self.model_page += 1
                 self.rpc('model/list', {'limit': 100, 'includeHidden': False, 'cursor': cursor}, 4)
                 return
             rows = list({row['model']: row for row in self.model_rows if isinstance(row['model'], str)}.values())
             self.catalogs[(self.workspace_id, self.cwd)] = {row['model'] for row in rows}
             message = {'type': 'models', 'id': self.request_id, 'models': rows}
-            self.cleanup()
+            process_state = self.cleanup()
+            self.trace_terminal('completed', process_state=process_state)
+            message.update(self.trace_details())
             self.request_id = None
             send(message)
+            self.clear_trace()
         elif value.get('id') == 2:
             result = value['result']
             self.thread_id = result['thread']['id']
@@ -1158,6 +1252,7 @@ class Host:
             item = params['item']
             if params.get('threadId') == self.thread_id and item.get('type') == 'agentMessage':
                 self.messages[item['id']] = item['text']
+                self.trace_event('agent_message', length=len(item['text']))
                 if sum(len(text) for text in self.messages.values()) > MAX_TEXT:
                     self.messages = {}
                     self.finish('failed', '応答が検証版の文字数上限を超えました。')
@@ -1201,8 +1296,16 @@ class Host:
                             try:
                                 self.command(value)
                             except (ValueError, KeyError, OSError) as error:
+                                active = self.trace and self.trace['requestId'] == value.get('id')
+                                if active:
+                                    self.trace_terminal('rejected', self.error_code(error))
+                                    details = self.trace_details()
+                                else:
+                                    details = getattr(error, 'trace_details', {})
                                 send({'type': 'error', 'id': value.get('id') if isinstance(value, dict) else None,
-                                      'error': str(error)})
+                                      'error': str(error), **details})
+                                if active:
+                                    self.clear_trace()
                     elif self.process:  # An earlier event may already have ended it.
                         if not chunk:
                             self.finish('failed', 'Codexとの接続が終了結果を返す前に切れました。')
@@ -1229,7 +1332,8 @@ def main():
     try:
         host.loop()
     except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
-        send({'type': 'error', 'id': host.request_id, 'error': str(error)})
+        host.trace_terminal('failed', host.error_code(error))
+        send({'type': 'error', 'id': host.request_id, 'error': str(error), **host.trace_details()})
 
 
 if __name__ == '__main__':

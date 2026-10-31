@@ -608,6 +608,7 @@ $("connect").addEventListener("click", () => {
       const saved = savedModel();
       if (message.models.some(model => model.model === saved)) $("model").value = saved;
       $("status").textContent = message.models.length ? "モデルを選択して送信してください。" : "モデル候補がありません。一覧を再取得してください。";
+      $("diagnostics").textContent = message.traceId ? `追跡ID: ${message.traceId}${message.diagnosticsUnavailable ? "（診断ログを保存できません）" : ""}` : "";
     } else if (message.type === "started" && message.id === pendingId) {
       $("status").textContent = pendingKind === "models" ? "モデル一覧を取得中…" : "Codex実行中…";
     } else if (message.type === "stopping" && message.id === pendingId) {
@@ -647,6 +648,7 @@ $("connect").addEventListener("click", () => {
       if (message.error) {
         $("status").textContent += `：${typeof message.error === "string" ? message.error : JSON.stringify(message.error)}`;
       }
+      if (message.traceId) $("diagnostics").textContent = `追跡ID: ${message.traceId}${message.diagnosticsUnavailable ? "（診断ログを保存できません）" : ""}`;
     } else if (message.type === "error") {
       // Validation errors do not cancel a different in-flight request.
       if (message.id === pendingId && pendingKind?.startsWith("git_")) {
@@ -655,6 +657,7 @@ $("connect").addEventListener("click", () => {
       } else {
         $("status").textContent = `エラー: ${message.error}`;
       }
+      if (message.traceId) $("diagnostics").textContent = `追跡ID: ${message.traceId}${message.diagnosticsUnavailable ? "（診断ログを保存できません）" : ""}`;
       if (message.id === stopRequestId) {
         stopping = false;
         stopRequestId = null;
