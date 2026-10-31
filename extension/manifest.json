@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Focodex 接続検証",
+  "name": "Focodex",
   "version": "0.1.11",
   "description": "Native Messaging経由でCodexと一往復する検証版",
   "browser_specific_settings": {
@@ -8,5 +8,5 @@
   },
   "permissions": ["nativeMessaging", "tabs", "storage"],
   "background": {"scripts": ["draft-background.js", "background.js"]},
-  "action": {"default_title": "Focodex 接続検証を開く"}
+  "action": {"default_title": "Focodex"}
 }
