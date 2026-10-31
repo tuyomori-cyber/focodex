@@ -77,6 +77,24 @@ Native Hostは実行ID、Codex要求に紐付けた一時ID、項目ID、スレ�
 
 Firefoxを再起動すると一時拡張は再読み込みが必要。拡張コードの変更後も`about:debugging`から再読み込みする。
 
+## エラーで操作が止まったとき
+
+1. 画面に表示されているエラーと「追跡ID」を控える。Hostとの接続が切れた場合など、追跡IDが表示されないこともある。
+2. Firefoxを起動したユーザーの `~/.local/state/focodex/operation-diagnostics.jsonl` を開き、該当する`traceId`の行を確認する。Native Hostの環境で`XDG_STATE_HOME`が設定されている場合は、代わりに `$XDG_STATE_HOME/focodex/operation-diagnostics.jsonl` に保存される。
+3. 各行の`at`はUTC時刻、`stage`は処理段階、`status`や`errorCode`は終了状態や分類を示す。最後に記録された段階と終端行を確認する。ログがローテーションされている場合は、同じディレクトリの `operation-diagnostics.jsonl.1` も確認する。
+
+このログの対象はモデル一覧取得とCodex実行で、指示文・応答本文・生のエラー本文は保存しない。Hostが起動しなかった場合やログの保存に失敗した場合は、該当記録が残らないことがある。更新版Hostの再登録前に発生したエラーも記録されない。終了未確認の警告が出た場合は、`config.execution.json`を手動削除せず、後述の「今回の実装範囲」にある終了確認の手順に従う。詳細は[操作診断トレース設計](specification/操作診断トレース設計.md)を参照。
+
+### Gitのリモート操作を確認する
+
+1. 画面に表示されたエラーと、実行した操作（読み取り専用SSH接続試験、Fetch、Pull、Push）を控える。
+2. `~/.local/state/focodex/remote-ssh-diagnostics.jsonl` を開き、末尾付近の`event`と`outcome`を確認する。Native Hostの環境で`XDG_STATE_HOME`が設定されている場合は、`$XDG_STATE_HOME/focodex/remote-ssh-diagnostics.jsonl` に保存される。Pullでは先にFetchの行が記録されることがある。
+3. `outcome`の`passed`は成功、`timeout`は時間切れ、`ssh-error`はSSH経路での失敗を示す。`classification`があれば、`host-key`（ホスト鍵）、`agent-auth`（専用Agentの認証）、`target-connection`（接続先への接続）、`push-rejected`（Push拒否）などの分類を確認する。`returnCode`と`relayAccepted`、`targetConnected`、`wrapperStatus`、`proxyStatus`は取得できた場合に中継の状態を示す。
+
+このログには時刻や追跡IDがなく、直近の操作と行を照合する。SSH接続試験とFetch・Pull・Pushの一部の段階を記録するもので、事前検証での拒否やStatus・Stage・Commitを含むすべてのGit操作が記録されるわけではない。保存不能時も行は残らない。リモートURL、鍵、SSHの生の標準エラーは保存しない。結果が未確認の場合は自動再送せず、上記の実行記録を手動削除しない。詳細は[読み取り専用SSH接続試験の引継ぎ記録](specification/Focodex_読み取り専用SSH接続試験_引継ぎ記録_2026-10-24.md)を参照。
+
+## Git・差分・Commit
+
 画面下部の「Git・差分・Commit」では、選択中のプロジェクトについて「Git状態を取得」を押すと、変更ファイル名を一覧表示する。各ファイル名をタップすると、そのファイルの未ステージ・未追跡差分とステージ済み差分を開く。Codex App Serverを経由せず、Native HostがGit状態取得、選択的ステージ、最終確認、Commitを実行する。通常リポジトリとGit worktreeを扱い、Git管理ディレクトリの実体を確認する。Codex実行中は取得しない。外部ヘルパーを設定したリポジトリや表示上限を超える差分はエラーにする。未追跡ファイルのプレビューはプロジェクト内の通常ファイルかつUTF-8テキストに限り、1ファイル10万バイトまで表示する。更新Hostを再登録後、Firefoxで状態取得、Stage、Commit最終確認、Commit、再取得を確認済みである。リモート事前診断と、固定宛先・最小known_hosts・専用Agent・一接続中継を使う読み取り専用SSH接続試験を提供し、Surfaceで実upstreamへの`ls-remote`成功を確認済みである。Fetch、Fast-forward Pull、現在ブランチからupstreamへの非強制Pushを実装した。Surfaceで`git-test`に対し、Stage、最終確認、Commit、通常Pushを実行し、別端末で送信したコミット内容（`あ`）の反映を確認した。Pushは通常リポジトリの現在ブランチと明示upstreamに固定する。異常系など残る実機試験は未実施である。
 
 ## permission profileの適用状態と確認結果
